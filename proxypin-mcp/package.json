@@ -1,0 +1,16 @@
+{
+  "name": "dsh-flowspot-proxypin-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Configuration-only bundle that connects ProxyPin's MCP server to DeepSeek Harness, so the agent can read the phone's captured traffic. 只做配置：把 ProxyPin 的 MCP 服务接进 DSH，手机端抓包由 ProxyPin 负责，本插件不碰。",
+  "license": "MIT",
+  "files": [
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

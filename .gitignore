@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# captured data must never be committed: the CA private key and request bodies
+# are personal data (some of it sensitive)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jsonl
+sysproxy.backup.json
+dsh-flowspot.location.json
+
+# local data directories if a user points dataDir inside the repo
+flows/
+capture-data/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

@@ -1,0 +1,184 @@
+# dsh-flowspot 主流程实现细节
+
+本文写「一次抓包」和「一次读取」在主流程里的判定、上限、字段落点与失败路径，按代码实际执行顺序排列。核心功能与模块清单见 `architecture.md`，为什么这样选见 `adr.md`，怎么跑见 `README.md`。
+
+## 1. 一次 HTTPS 抓包
+
+### 1.1 装配：`index.js` → `lib/runtime.js`
+
+- `apply(ctx, config)` 只做三件事，且都在 `ctx.effect` 里注册：`ctx.inject(['webServer'])` 挂路由、`ctx.inject(['tools'])` 注册 9 个工具、以及一个卸载钩子在 `runtime.dispose()` 时停代理并恢复系统代理。**顶层 `inject` 只有 `slots`**（客户端），宿主侧服务全部走 nested inject 或 `ctx.get`，理由见 ADR-0008 与踩坑第 1 条。
+- runtime 懒创建：第一次调用工具或路由时才 `createRuntime`，失败会记住 `runtimeError` 并在下次直接抛，不重复初始化。一个进程只有一个 runtime，面板与 agent 共用同一份 flow 缓冲，也就不会有两个进程抢 8899。
+- `dispose()` = `stop()`（先恢复系统代理再关监听）+ `store.close()`（关 JSONL 流）。卸载时若跳过 `stop()`，注册表里会留下指向死端口的系统代理。
+
+### 1.2 监听与端口兜底：`MitmProxy.start()`
+
+- 绑定 `127.0.0.1`，先试 `cfg.port`（默认 `8899`）。`EADDRINUSE` / `EACCES` / `EPERM` 时改绑 `0` 让系统分配，并把原因写进 `portNote`，`start()` 的 `warning` 与 `snapshot().portNote` 都带这一句（`EACCES` 在本机常见于 Hyper-V/WinNAT 的排除端口段 9198–9297，见踩坑第 2 条之前的端口事故）。
+- 两个 `http.Server`：外层 `server` 收 CONNECT 与绝对 URL 形式的请求，内层 `inner` 只处理解密后的隧道请求。`inner` 不进监听，靠 `tlsSocket` 的 `'secure'` 事件 `emit('connection')` 挂载。
+
+### 1.3 CONNECT 与解密：`_handleConnect()`
+
+- `req.url` 形如 `host:port`，用最后一个 `:` 切分（IPv6 的 `[::1]:443` 去掉方括号），缺端口按 443。缺 host 直接回 `400`。
+- 先回 `HTTP/1.1 200 Connection Established`，把 CONNECT 残留的 `head` `unshift` 回 socket，否则第一个请求会丢字节。
+- `new tls.TLSSocket(clientSocket, { isServer: true, secureContext, SNICallback })`：初始上下文按 CONNECT 的 host 取，`SNICallback` 再按真实 SNI 取（同一隧道里可能换域名）。取不到证书时记 `lastError` 并销毁连接。
+- `tlsSocket.__target = { host, port }` 是隧道内请求判定目标的唯一依据；`_handleRequest` 用 `req.socket.__target` 读它。
+
+### 1.4 目标解析：`_resolveTarget()`
+
+- 绝对 URL（`http://` 或 `https://` 开头，普通 HTTP 代理形式）→ 直接 `new URL` 取 scheme/host/port/path。
+- 否则读 `req.socket.__target`（隧道）→ 固定 `https`，path 用 `req.url`。
+- 两者都没有 → 回 `400`（说明缺少 CONNECT 隧道），**不建 flow**。
+
+### 1.5 请求转发：`_handleRequest()`
+
+- 建 flow 时 `startedAt` 用 `Date.now()`，`url` 由 `scheme://host+path` 拼，`host` 取 `req.headers.host` 去端口，`tunnel` 记录 CONNECT 目的地址。
+- 头处理：`_forwardHeaders()` 丢掉 `HOP_BY_HOP`（`connection`、`proxy-*`、`keep-alive`、`te`、`trailer`、`transfer-encoding`、`upgrade`），再重写 `host`（443/80 不带端口）。**Upgrade 请求改走 `DROP_ON_UPGRADE`**：只丢代理相关与 `te/trailer`，保留 `connection`/`upgrade`，否则源站回 400 而不是 101（踩坑见 ADR-0007 与 WS 修复）。
+- 上游选项：`http`/`https` 按 scheme 选，`servername` 仅在非 IP 时设（IP 会触发 SNI 校验失败），`ALPNProtocols: ['http/1.1']` 固定，`rejectUnauthorized` 跟 `cfg.upstreamRejectUnauthorized`。
+- 连接池：`http.Agent` / `https.Agent` 的 `keepAlive` 默认 **false**、`maxSockets: 64`。不开 keep-alive 是为了消除「复用被源站关掉的空闲连接 → 下一个请求 `socket hang up`」这一类失败（ADR-0007），代价是每请求一次 TCP+TLS。
+- 请求体：`req.pipe(tee).pipe(upstream)` 透传，同时把前 `maxBodyBytes`（默认 262144）字节缓存，`req 'end'` 时 `setRequestBody`，其内部再截到 65536。`tee` 与 `req` 都挂 `error` 处理器，否则客户端中途断开会让进程崩溃。
+- 响应：收到上游响应头立刻 `res.writeHead()` + `flushHeaders()`，再把 body 通过 `PassThrough` 直接 `pipe(res)`——**不为下游攒整个响应**，所以 SSE/长轮询不会被缓冲卡住；缓存副本只到 `maxBodyBytes` 为止。
+- 结束：`upRes 'end'` → `store.finish(flow, {status, headers, body})`；`res 'close'` 且 `!res.writableFinished` 记为 `phase: client`（客户端提前关）。
+
+### 1.6 失败判定与错误分类
+
+- 请求级失败（`upstream.on('error')`、构造请求抛错、超时）：`code = err.code`，`phase = clientAborted ? 'client' : 'upstream'`；超时是 `ETIMEDOUT`（`upstream.setTimeout(cfg.upstreamTimeoutMs ?? 30000)` 后 `destroy`）。
+- 响应级失败（`upRes 'aborted'` / `'error'`）：`phase: 'body'`；WS 升级方向失败记 `upgrade`（见 `_handleUpgrade`）。
+- **`phase: 'client'` 不算代理失败**：不写 `lastError`、不 `_noteError`，只把 `error/errorCode/errorPhase` 记进 flow。Chrome 的后台请求/预取会大量取消，如果算失败会把真正的上游故障挤掉。
+- `_noteError` 聚合键 `method host path | code | phase`，最多 20 条，命中时 `count++`、刷新 `ts/message/flowId`（`flowId` 指向最近一次失败，供面板跳转）。`clearErrors()` 同时清 `recentErrors` 与 `lastError`，由 `webcap_clear` 调用。
+- 失败时若还没发响应头，回 `502` 并把原因写进 body；已发过头就 `res.destroy()`（无法再改状态码）。
+
+### 1.7 证书：`lib/x509.js` + `lib/der.js`
+
+- DER 原语在 `der.js`（`tlv/seq/setOf/integer/bitString/octetString/oid/bool/time/context`），不引第三方库（ADR-0003）。
+- CA 首次启动生成：RSA-2048、`CA_VALIDITY_DAYS = 3650`、BasicConstraints CA=true、KeyUsage `[5,6]`（keyCertSign + cRLSign）、SubjectKeyId。落盘 `ca.crt` + `ca.key.pem`（私钥 0600）。
+- `issuer` 字节必须与 CA subject 完全一致，所以每次 `init()` 都用 `caSubjectDer()` 重新编码同一个 subject，而不是从证书里反解（反解会因顺序/编码差异导致链校验失败）。
+- 叶子证书：`LEAF_VALIDITY_DAYS = 397`，共享一对 `leaf.key.pem` / `leaf.pub.der`，BasicConstraints CA=false、KeyUsage `[0,2]`（digitalSignature + keyEncipherment）、EKU serverAuth、SAN（域名走 `dNSName`，IP 走 `iPAddress`，含 IPv6 字节化）、SKI/AKI。
+- 缓存：`leafCache` 与 `contextCache` 各最多 `LEAF_CONTEXT_CACHE = 512`，超了删最早插入的一项；`contextFor(host)` 缓存的 `tls.SecureContext` 直接给 `TLSSocket`，避免每次握手重建。
+
+### 1.8 flow 记录：`lib/flows.js`
+
+- 环形缓冲：`maxFlows` 最小 50、默认 1000；超了 `shift()` 最早的并 `byId.delete`，`dropped` 计数。`id = f<seq>`，`seq` 单调递增，是 `since` 时间窗的锚点。
+- 字段落点：`reqHeaders` 在 `begin()` 就脱敏；`respHeaders`/`mime` 在 `finish()`；`respBody` 由 `describeBody` 生成；`error/errorCode/errorPhase` 只在有错误时写。
+- 脱敏集合 `SENSITIVE_HEADERS`：`authorization`、`cookie`、`set-cookie`、`proxy-authorization`、`x-api-key`、`x-auth-token`，命中写 `***redacted***`。键名统一转小写。
+- `describeBody(buf, headers, maxBytes)`：按 `content-encoding` 用 `zlib` 同步解 `gzip`/`deflate`/`br`（失败就保留原字节并标 `encoding: null`），超过 `maxBytes` 截断并 `truncated: true`；文本判定 = mime 命中 `TEXTUAL` 正则，或字节里控制字符占比 < 2%（有 `\0` 直接判二进制）；文本进 `text`，否则 `base64`。`wireBytes` 记解压前长度，`bytes` 记解压后长度。
+- 落盘：`persist` 为真时在 `<数据目录>/flows/` 建 `flows-<ISO时间戳>.jsonl`，每完成一条 append 一行；写盘时 body 文本截到 32768，序列化异常只 `log.warn` 不影响抓包。
+- `summaryOf(flow)` 是列表/分组/工具的共用投影：`id/seq/time/method/status/type/host/port/path/url/mime/durationMs/respBytes/error/errorCode/errorPhase`。
+- `resourceTypeOf(flow)` 判定顺序：`upgrade: websocket` 或 `status === 101` → `ws`；`sec-fetch-dest` 命中 `DEST_TYPES` → 对应类型（`empty` → `xhr`，`document`/`iframe`/… → `doc`，`style` → `css`，`script`/`worker` → `js`…）；`report`/`xslt` → `other`；否则 mime 兜底（`wasm` → `wasm`，`image/*` → `img`，`video|audio` → `media`，`font`/`woff` → `font`，`css` → `css`，`javascript|ecmascript` → `js`，`html|xhtml` → `doc`，`manifest` → `manifest`，其余 → `xhr`）。
+- `list()` 过滤顺序：`since` → `host`（子串、大小写不敏感）→ `method`（大写比较）→ `status`（精确）→ `type` → `q`（在 `url host method` 里子串）；从新到旧遍历，满 `limit` 就停，默认 20、上限由调用方压到 200。
+- `listGroups()`：`method + URL` 为键，`normalize` 为真时 URL 先过 `normalizeUrl()`（去掉 `VOLATILE_PARAMS` 并排序其余参数）；每组带 `count/statuses/errors/first/latest/items`（`items` 最多 `maxItems = 50`，超出置 `truncated`）。
+- `search()`：`scope` ∈ `all|url|body`（`all` 同时搜 URL、请求/响应头与两侧报文体，命中项带 `where` 与 `snippet`）；`limit` 上限 100。
+- 导出：`curlOf()` 用 method/url/头/body 生成可复制命令；`harEntryOf()`/`harOf()` 生成 HAR 1.2（headers 转 `{name,value}` 数组、`content.mimeType/size/text`、`startedDateTime/time`）。
+
+## 2. 一次读取（面板与 agent）
+
+### 2.1 工具：`lib/tools.js`
+
+| 工具 | 关键参数 | 说明 |
+|---|---|---|
+| `webcap_status` | — | 代理快照、系统代理、CA 状态、`flows.stats()`、`paths`（含 `source` 与 `pending`）、`build` |
+| `webcap_serve` | `action: start\|stop\|restart`、`port`、`setSystemProxy` | start 后回读系统代理确认；restart = 先 stop 再 start |
+| `webcap_ca` | `action: status\|install\|uninstall` | 走 `certutil -addstore/-delstore`，返回 thumbprint 与路径 |
+| `webcap_flows` | `type/host/method/status/q/since/limit/group/normalize` | `group: true` 时返回 `{grouped: true, groups}`，否则 `{flows}`；渲染分别走 `groupLine`/`flowLine` |
+| `webcap_detail` | `id` | 去掉 body 文本/base64，附 `errorHint`（`ERROR_HINTS` 按 `errorCode`） |
+| `webcap_body` | `id`、`side: request\|response`、`offset`、`limit`（默认 4096，上限 65536） | 按字符切片，返回 `text`/`base64` 与 `truncated` |
+| `webcap_search` | `q`、`scope: all\|url\|body`、`limit` | URL / 头 / 报文体搜索，命中带 `where` 与片段 |
+| `webcap_export` | `format: curl\|har\|json`、`id`、`limit` | curl 单条；har/json 按条数 |
+| `webcap_clear` | `confirm: true` | 清 ring + 代理的失败摘要，返回 `cleared` 与 `errorsCleared` |
+
+所有工具输出契约：`ok` 必填，失败时给 `error`；渲染器只消费这些字段。
+
+### 2.2 路由：`lib/routes.js`
+
+- 10 条 `exact` 路由挂在 `/dsh-flowspot/` 下，全部复用工具定义（`call(name, args)`），所以面板与 agent 读到的是同一份投影。
+- `query(req)` 解析 URL 参数，`num()` 只接受整数；POST 走 `readBody`（JSON，坏 JSON 回 400）。
+- `optionalService(ctx, name)` 先 `ctx.get(name)`，拿不到再读属性并 `catch`——宿主服务缺失时回落到「不支持」，不把异常抛进接口（踩坑第 2 条）。
+- `data-dir`：`action: pick` 走 `ctx.directoryPicker` 的 native 选择器；`{dataDir}` 直接设；`{action: reset}` 清 pointer。抓包中调用返回 `ok: false` 与「先停止抓包」。
+- `flows` 透传 `group`/`normalize`（`1`/`true` 都认）。
+- POST 路由先过 `crossSite(req)`：浏览器声明 `sec-fetch-site != same-origin`，或 `Origin` 的主机与 `Host` 不一致时回 `403`。防的是「别的网站提交一个简单 POST 就能清空抓包」这类副作用（响应读不到，但动作已经发生）；没有这些头的 curl / 测试照常放行。
+
+| 路径 | 方法 | 参数 |
+|---|---|---|
+| `/dsh-flowspot/status` | GET | — |
+| `/dsh-flowspot/serve` | POST | `{"action":"start"\|"stop"\|"restart"}` |
+| `/dsh-flowspot/ca` | POST | `{"action":"status"\|"install"\|"uninstall"}` |
+| `/dsh-flowspot/data-dir` | POST | `{"action":"pick"}` / `{"dataDir":"..."}` / `{"action":"reset"}` |
+| `/dsh-flowspot/flows` | GET | `type` / `host` / `method` / `status` / `q` / `since` / `limit`；`group=1`、`normalize=1` |
+| `/dsh-flowspot/detail` | GET | `id` |
+| `/dsh-flowspot/body` | GET | `id` / `side=request\|response` / `offset` / `limit` |
+| `/dsh-flowspot/search` | GET | `q` / `scope=all\|url\|body` / `limit` |
+| `/dsh-flowspot/export` | GET | `format=curl\|har\|json` / `id` / `limit` |
+| `/dsh-flowspot/clear` | POST | `{"confirm":true}` |
+
+路由挂在 GUI 的同一个端口上（DSH web 默认 `3080`），试一下：
+
+```powershell
+curl.exe http://127.0.0.1:3080/dsh-flowspot/status
+curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
+```
+
+### 2.3 面板：`client/client.js`
+
+- 四个注册位：`sidebar.panellist`（`id: dsh-flowspot`、`order: 40`、label 抓包工具）+ `main`（同 key 的整页）+ nested `sidebarRightTabs.register`（`kind: flowspot`，带 `guide` 项「抓包工具」）+ `sidebar.right.pane.tab`（同 key 的正文）。整页与右栏共用同一个 `Panel` 组件，`docked` 只切布局。
+- 轮询：`status` 与 `flows` 每 3000ms 各拉一次；筛选变化单独走 150ms 防抖，两者都读 `filtersRef`，避免轮询重置输入。列表固定 `limit=200`。
+- 位置切换：`togglePlacement(docked)` —— docked → `layout.selectPanel(PANEL_ID)` 并 `close(tabId)`；page → 先 `layout.selectPanel(null)` 归还中栏，再按帧（最多 24 帧）重试 `sidebarRight.openTab`。右栏正文挂载时若中栏仍是本面板整页，主动 `selectPanel(null)`。
+- 三块布局：菜单（状态四格、开始/停止、清空、设置、⇄）、请求列表（合并开关、`Default/Success/Error` 三档、筛选、失败/成功两块）、请求详情（错误卡片 + 四个可折叠小节）。失败行与成功行同用 `rowOf()`，只多一个 `dshwc-item-failed` 类（整行错误色）。
+- 失败视图：`listRows('failed'|'ok'|'all')` 从同一份 `flows`/`groups` 里筛；整页时成功在上、失败在下（`flex: 0 0 20%`），`Default` 不带满、`Success`/`Error` 各占满；窄栏只渲染 `all` 一个滚动容器。
+- 合并：请求带 `group=1`；响应没有 `grouped`（宿主侧旧）时用 `groupLocal()` 在客户端按同一规则合并，并在列表里标「本地合并」。
+- 详情：选中后拉 `/detail`，再按需拉响应体（`limit=4000`）与请求体；`errorHint` 直接渲染在错误卡片里。
+- 版本不一致：`status.build` 缺失即判宿主旧，顶部横幅 + 清空时先按时间戳本地隐藏旧失败条目（`errorsClearedAt`）。
+- 样式只用 `--dsw-alias-*` token（label/bg/border/brand/state-*/settings-card-*），不写字面色值。
+
+## 3. Windows 集成
+
+### 3.1 系统代理：`lib/sysproxy.js` + `sysproxy.ps1`
+
+- 键 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`；`enable(port)` 先备份（仅当备份文件不存在）再写 `ProxyEnable=1`、`ProxyServer=127.0.0.1:<port>`、`ProxyOverride=<local>;127.0.0.1;localhost;*.local`。
+- 写完必须广播：`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File sysproxy.ps1 -Notify`，脚本里 P/Invoke `InternetSetOption` 发 `INTERNET_OPTION_SETTINGS_CHANGED`/`REFRESH`；广播失败只 warn（设置仍写入，部分程序下次启动才生效）。
+- `disable()` 有备份就还原三项并删备份，没有就把 `ProxyEnable` 置 0。备份文件 `sysproxy.backup.json` 在数据目录，异常退出后下次 `stop()` 仍能恢复。
+
+### 3.2 CA 信任：`lib/certstore.js`
+
+- `install()` = `certutil -addstore -user Root <ca.crt>`（用户级，免管理员），装完回读 `status()`，`installed` 仍为假就抛错并带 certutil 输出。
+- `uninstall()` = `certutil -delstore -user Root <thumbprint>`。
+- `status()` 用 PowerShell `Get-ChildItem Cert:\CurrentUser\Root | Where-Object { $_.Thumbprint -eq '<SHA-1>' }` 计数——避免解析 `certutil` 的中文本地化输出；thumbprint 先过 `^[0-9A-F]+$` 校验，防止拼进脚本注入。
+
+## 4. 配置与数据目录
+
+- `DEFAULTS`：`port 8899`、`dataDir ''`、`maxFlows 1000`、`maxBodyBytes 262144`、`redact true`、`persist true`、`upstreamRejectUnauthorized true`、`upstreamTimeoutMs 30000`、`upstreamKeepAlive false`、`setSystemProxyOnStart true`。
+- `normalizeConfig()`：数值项必须为正数否则回落默认；布尔项用 `!== false` / `=== true` 的显式比较；`port` 允许 0（随机）。
+- 数据目录优先级：面板 pointer 文件 `$DSH_HOME/dsh-flowspot.location.json` > 配置 `dataDir` > `$DSH_HOME/dsh-flowspot`。`expandDataDir()` 接受绝对路径、`~`/`~/x`、其它相对路径按 DSH home 解析（不是进程 cwd）。
+- `adoptDataDir()`：目标必须是可写目录；目标没有 `ca.crt` 而当前目录有时，复制 `ca.crt`/`ca.key.pem`/`leaf.key.pem`/`leaf.pub.der`（保持已信任的根继续可用）；已有别家 CA 则不覆盖并标 `foreignCa`；写 pointer，返回 `restartRequired: true`。抓包运行中 `changeDataDir()`/`resetDataDir()` 直接拒绝。
+- `status().paths.pending` 表示「已经选了、但本进程还没切过去」的目录，面板据此显示「重启后生效」。
+
+### 改配置
+
+除了数据目录（面板里的「设置」选），其余字段写进 profile 的 `cordis.patch.yml`（`%USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml`），按行 id 覆盖：
+
+```yaml
+- id: dsh-flowspot
+  config:
+    port: 8899
+```
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `port` | `8899` | 代理端口，`0` 表示随机；避开 `netsh interface ipv4 show excludedportrange protocol=tcp` 列出的范围 |
+| `dataDir` | 空（用默认目录） | 只在无界面 / 远程部署时用；面板里选过的目录优先于它 |
+| `maxFlows` | `1000` | 内存里保留多少条 flow |
+| `maxBodyBytes` | `262144` | 单个报文体预览上限（字节） |
+| `redact` | `true` | 是否打码敏感请求头 |
+| `persist` | `true` | 是否把完成的 flow 追加到 JSONL |
+| `upstreamKeepAlive` | `false` | 复用上游连接；默认关（ADR-0007），批量压测类场景可打开 |
+| `upstreamTimeoutMs` | `30000` | 上游请求超时 |
+| `setSystemProxyOnStart` | `true` | `start` 时是否把系统代理指向本插件 |
+
+按 id 覆盖会**替换整行的 config**（不是深合并）：以后再加字段时，要把仍想保留的字段一起写上。
+
+## 5. 测试边界
+
+- `test/der.test.mjs`（7）：长度编码边界、`integer` 正负、`oid`、`time`、`bitString` 等原语。
+- `test/x509.test.mjs`（6）：CA 生成/加载、叶子链、SAN/IP、真 `tls` 握手；第 6 条断言过窄（见 `todo.md`）。
+- `test/flows.test.mjs`（21）：环形淘汰、过滤、类型分类、`describeBody` 解压/截断/base64、脱敏、JSONL、curl/HAR、`listGroups` 与 `normalizeUrl`。
+- `test/routes.test.mjs`（22）：10 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`clear` 清 `recentErrors`、跨站 POST 被拒。
+- `test/runtime.test.mjs`（14）：`normalizeConfig`、数据目录优先级与 `expandDataDir`、`adoptDataDir` 的复制与拒绝。
+- `test/proxy.test.mjs`（3）：`parseHead` 跨块解析、`_noteError` 聚合与上限。
+- 全部零依赖，`node test/<file>.mjs` 直接跑；真实 TLS 用例依赖本机 Node ≥ 22 的 `crypto`。

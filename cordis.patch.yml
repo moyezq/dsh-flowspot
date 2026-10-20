@@ -1,0 +1,9 @@
+# dsh-flowspot bundle layer: applied when the package is installed as a
+# profile bundle (package.json declares dsh.bundle.patch).
+#
+# The plugin is appended to the composed profile; every setting lives under the
+# row's `config` and is read by apply(ctx, config) with its own defaults, so
+# editing that config here survives plugin upgrades.
+- insert:
+    - id: dsh-flowspot
+      name: dsh-flowspot

@@ -1,0 +1,21 @@
+# ProxyPin MCP bridge: a configuration-only bundle (no Host or Client entry
+# file). It inserts the already-installed MCP client row, which then exposes
+# ProxyPin's tools to the model as mcp__proxypin__<tool>.
+#
+# Before this can connect: ProxyPin Desktop must be running with its MCP
+# service enabled (default http://127.0.0.1:9127/mcp). If port 9127 was already
+# taken, ProxyPin picks a random port — read the real URL from its settings
+# panel and change `url` below.
+#
+# failOnStartupError: true follows the host template: a broken row is reported
+# at boot instead of silently disappearing. Set it to false if ProxyPin is not
+# always running and you can live with the tools being absent until the next
+# DSH restart.
+- insert:
+    - id: proxypin-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: proxypin
+        transport: streamable-http
+        url: http://127.0.0.1:9127/mcp
+        failOnStartupError: true
