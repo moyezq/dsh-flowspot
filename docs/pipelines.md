@@ -7,7 +7,7 @@
 ### 1.1 装配：`index.js` → `lib/runtime.js`
 
 - `apply(ctx, config)` 只做三件事，且都在 `ctx.effect` 里注册：`ctx.inject(['webServer'])` 挂路由、`ctx.inject(['tools'])` 注册 9 个工具、以及一个卸载钩子在 `runtime.dispose()` 时停代理并恢复系统代理。**顶层 `inject` 只有 `slots`**（客户端），宿主侧服务全部走 nested inject 或 `ctx.get`，理由见 ADR-0008 与踩坑第 1 条。
-- runtime 懒创建：第一次调用工具或路由时才 `createRuntime`，失败会记住 `runtimeError` 并在下次直接抛，不重复初始化。一个进程只有一个 runtime，面板与 agent 共用同一份 flow 缓冲，也就不会有两个进程抢 8899。
+- runtime 懒创建：第一次调用工具或路由时才 `createRuntime`，失败会记住 `runtimeError` 并在下次直接抛，不重复初始化。**一次挂载**只有一个 runtime，面板与 agent 共用同一份 flow 缓冲，不会有两个实例抢 8899；但热重载（启停插件、改 profile 的 `cordis.patch.yml`）会重新执行 `apply()` 并新建一个 runtime，旧实例由卸载钩子的 `dispose()` 释放。
 - `dispose()` = `stop()`（先恢复系统代理再关监听）+ `store.close()`（关 JSONL 流）。卸载时若跳过 `stop()`，注册表里会留下指向死端口的系统代理。
 
 ### 1.2 监听与端口兜底：`MitmProxy.start()`
@@ -60,7 +60,7 @@
 - 字段落点：`reqHeaders` 在 `begin()` 就脱敏；`respHeaders`/`mime` 在 `finish()`；`respBody` 由 `describeBody` 生成；`error/errorCode/errorPhase` 只在有错误时写。
 - 脱敏集合 `SENSITIVE_HEADERS`：`authorization`、`cookie`、`set-cookie`、`proxy-authorization`、`x-api-key`、`x-auth-token`，命中写 `***redacted***`。键名统一转小写。
 - `describeBody(buf, headers, maxBytes)`：按 `content-encoding` 用 `zlib` 同步解 `gzip`/`deflate`/`br`（失败就保留原字节并标 `encoding: null`），超过 `maxBytes` 截断并 `truncated: true`；文本判定 = mime 命中 `TEXTUAL` 正则，或字节里控制字符占比 < 2%（有 `\0` 直接判二进制）；文本进 `text`，否则 `base64`。`wireBytes` 记解压前长度，`bytes` 记解压后长度。
-- 落盘：`persist` 为真时在 `<数据目录>/flows/` 建 `flows-<ISO时间戳>.jsonl`，每完成一条 append 一行；写盘时 body 文本截到 32768，序列化异常只 `log.warn` 不影响抓包。
+- 落盘：`persist` 为真时，`<数据目录>/flows/` 下的 `flows-<ISO时间戳>.jsonl` 由**本次抓包第一条完成的 flow** 触发 `FlowStore.open()` 创建；`MitmProxy.start()` 只调 `beginSession()` 关掉上一份，`stop()` 调 `close()`——一次抓包会话一个文件，只加载插件、或开了抓包但没流量，都不留文件。每完成一条 append 一行，写盘时 body 文本截到 32768，序列化异常只 `log.warn` 不影响抓包。
 - `summaryOf(flow)` 是列表/分组/工具的共用投影：`id/seq/time/method/status/type/host/port/path/url/mime/durationMs/respBytes/error/errorCode/errorPhase`。
 - `resourceTypeOf(flow)` 判定顺序：`upgrade: websocket` 或 `status === 101` → `ws`；`sec-fetch-dest` 命中 `DEST_TYPES` → 对应类型（`empty` → `xhr`，`document`/`iframe`/… → `doc`，`style` → `css`，`script`/`worker` → `js`…）；`report`/`xslt` → `other`；否则 mime 兜底（`wasm` → `wasm`，`image/*` → `img`，`video|audio` → `media`，`font`/`woff` → `font`，`css` → `css`，`javascript|ecmascript` → `js`，`html|xhtml` → `doc`，`manifest` → `manifest`，其余 → `xhr`）。
 - `list()` 过滤顺序：`since` → `host`（子串、大小写不敏感）→ `method`（大写比较）→ `status`（精确）→ `type` → `q`（在 `url host method` 里子串）；从新到旧遍历，满 `limit` 就停，默认 20、上限由调用方压到 200。
@@ -141,13 +141,37 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 - `uninstall()` = `certutil -delstore -user Root <thumbprint>`。
 - `status()` 用 PowerShell `Get-ChildItem Cert:\CurrentUser\Root | Where-Object { $_.Thumbprint -eq '<SHA-1>' }` 计数——避免解析 `certutil` 的中文本地化输出；thumbprint 先过 `^[0-9A-F]+$` 校验，防止拼进脚本注入。
 
+### 3.3 运行埋点：`lib/logs.js`
+
+抓包插件最容易丢的证据不是流量，是「为什么」：端口为什么退到随机口、停止时系统代理恢复失败没有、上次装 CA 被 certutil 拒的原因。这些都不是请求，进不了 flow 流水账，所以单独一份事件日志。
+
+- 文件：`<数据目录>/logs/plugin-<YYYY-MM-DD>-<NN>.ndjson`，一行一个 `{ts, level, event, detail}`。
+- 上限：单文件超过 2 MiB 就切下一份（`-NN` 递增），最多保留 3 份，更旧的删掉。
+- 七条规则：
+  1. **只记非请求事件**：请求成败已经在 `flows/*.jsonl` 里，重复记只会膨胀；日志只补「非请求」的判定与状态变化。
+  2. **不记报文**：头、体、Cookie 一律不进日志（JSONL 里已有脱敏版本）。
+  3. **一行一个 JSON**：`ts / level / event / detail` 四字段，`event` 名固定，便于按事件过滤。
+  4. **懒创建**：第一次真的要写才建 `logs/`；插件加载时先写一条 `mount`，所以文件一出现就有内容，不会留下 0 字节日志。
+  5. **有上限**：2 MiB × 3 份，按日命名、超限删最旧；写入失败只 warn 一次，不让日志坏了变成日志风暴。
+  6. **可安全贴进 issue**：不含敏感信息，是开源项目收 bug 报告的第一手材料。
+  7. **路径可见**：`status.paths.log` 暴露目录，面板与 `webcap_status` 各一行说清「日志在哪」。
+- 记录的事件：`mount` / `unmount` / `capture-start`（真实端口、是否设了系统代理、warning）/ `capture-stop` / `system-proxy`（enable、disable，含是否绕过备份恢复）/ `ca-install` / `ca-uninstall` / `data-dir`（change、reset，含拒绝原因），外加各模块 `log.warn` / `log.error` 的自动落盘。
+- 不做：不引 winston / pino（零依赖是 ADR-0003 的同一条理由）；不做请求级日志；文件里不写 `debug` 级。
+
 ## 4. 配置与数据目录
 
 - `DEFAULTS`：`port 8899`、`dataDir ''`、`maxFlows 1000`、`maxBodyBytes 262144`、`redact true`、`persist true`、`upstreamRejectUnauthorized true`、`upstreamTimeoutMs 30000`、`upstreamKeepAlive false`、`setSystemProxyOnStart true`。
 - `normalizeConfig()`：数值项必须为正数否则回落默认；布尔项用 `!== false` / `=== true` 的显式比较；`port` 允许 0（随机）。
 - 数据目录优先级：面板 pointer 文件 `$DSH_HOME/dsh-flowspot.location.json` > 配置 `dataDir` > `$DSH_HOME/dsh-flowspot`。`expandDataDir()` 接受绝对路径、`~`/`~/x`、其它相对路径按 DSH home 解析（不是进程 cwd）。
-- `adoptDataDir()`：目标必须是可写目录；目标没有 `ca.crt` 而当前目录有时，复制 `ca.crt`/`ca.key.pem`/`leaf.key.pem`/`leaf.pub.der`（保持已信任的根继续可用）；已有别家 CA 则不覆盖并标 `foreignCa`；写 pointer，返回 `restartRequired: true`。抓包运行中 `changeDataDir()`/`resetDataDir()` 直接拒绝。
+- `adoptDataDir()`：只**校验 + 记 pointer**，不建目录、不复制。目标已存在则须是目录且可写；不存在则校验最近一层已存在的父目录。指针里同时写 `copyFrom`——只在新目录没有 `ca.crt`、而当前目录有时才写；目标已有别家 CA 则 `foreignCa: true` 且不交。返回 `copyOnStart` 与 `restartRequired: true`。抓包运行中 `changeDataDir()` / `resetDataDir()` 直接拒绝。
+- `adoptPendingCopy(dir)`：启动时、加载 CA 之前跑一次，建目录并把 `ca.crt` / `ca.key.pem` / `leaf.key.pem` / `leaf.pub.der` 复制过去（目标已有 CA 或来源没有就跳过），随后清掉指针里的 `copyFrom`——交一次就结束。所以「选了又反悔」既不留空目录，也不留 CA 私钥副本。
 - `status().paths.pending` 表示「已经选了、但本进程还没切过去」的目录，面板据此显示「重启后生效」。
+- 目录里每样东西在什么操作下产生（改这块前要知道）：
+  - `ca.crt` / `ca.key.pem` / `leaf.key.pem` / `leaf.pub.der`：**插件加载时** `createRuntime()` 就生成（`index.js` 的两个 `ctx.effect` 加载时即调 `getRuntime()`，不是点「开始抓包」才建），已存在则复用。
+  - `flows/flows-<时间戳>.jsonl`：**一次抓包会话一个**。`start()` 只开新会话（`beginSession()` 关掉上一份），文件由本次抓包第一条完成的 flow 创建，`stop()` 关闭——所以只加载插件、或开了抓包却没有流量，都不留空文件。`persist: false` 时整个 `flows/` 都不建。
+  - `logs/plugin-<日期>-<NN>.ndjson`：运行事件日志，第一次写事件才建（加载时即写一条 `mount`），最多 3 份（见 §3.3）。
+  - `sysproxy.backup.json`：第一次「开始抓包」且此前没有备份时写，`stop()` / 卸载时删除；它是异常退出后能恢复系统代理的唯一凭据。
+  - `$DSH_HOME/dsh-flowspot.location.json`：面板「设置 → 选择数据目录」成功时写、恢复默认时删。它在 DSH home，不在数据目录里，所以换目录后旧目录里不会有它。
 
 ### 改配置
 
@@ -176,9 +200,19 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 ## 5. 测试边界
 
 - `test/der.test.mjs`（7）：长度编码边界、`integer` 正负、`oid`、`time`、`bitString` 等原语。
-- `test/x509.test.mjs`（6）：CA 生成/加载、叶子链、SAN/IP、真 `tls` 握手；第 6 条断言过窄（见 `todo.md`）。
+- `test/x509.test.mjs`（6）：CA 生成/加载、叶子链、SAN/IP、真 `tls` 握手；第 6 条断言过窄（见本文末尾「人工关注」）。
 - `test/flows.test.mjs`（21）：环形淘汰、过滤、类型分类、`describeBody` 解压/截断/base64、脱敏、JSONL、curl/HAR、`listGroups` 与 `normalizeUrl`。
 - `test/routes.test.mjs`（22）：10 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`clear` 清 `recentErrors`、跨站 POST 被拒。
 - `test/runtime.test.mjs`（14）：`normalizeConfig`、数据目录优先级与 `expandDataDir`、`adoptDataDir` 的复制与拒绝。
 - `test/proxy.test.mjs`（3）：`parseHead` 跨块解析、`_noteError` 聚合与上限。
 - 全部零依赖，`node test/<file>.mjs` 直接跑；真实 TLS 用例依赖本机 Node ≥ 22 的 `crypto`。
+
+契约测试覆盖不到、改这些行为时要人工关注：
+
+- 右栏入口（`sidebarRightTabs` 的 nested inject、`openTab` 的按帧重试）与 ⇄ 的两个方向；
+- 「设置」弹窗里装/卸 CA 与选择数据目录（`ctx.get('directoryPicker')`、抓包运行中置灰）；
+- 整页 `Default / Success / Error` 三档、失败行并入列表、详情顶部的错误卡片；
+- 新旧宿主半边的降级：缺 `grouped` 走 `groupLocal()`、缺 `build` 显示版本横幅、`webcap_clear` 清 `recentErrors`；
+- 异常退出后的系统代理恢复（靠 `sysproxy.backup.json` 在下次 `stop()` 兜底）；
+- WS 握手转发（101 与头跨块解析）；
+- `x509.test.mjs` 第 6 条在新 Node 上断言过窄（实际报 `ERR_SSL_SSL/TLS_ALERT_HANDSHAKE_FAILURE`）：放开断言即可，签发逻辑没错。

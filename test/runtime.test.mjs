@@ -9,8 +9,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { clearLocation, readLocation, writeLocation } from '../lib/location.js'
-import { DEFAULTS, adoptDataDir, dataDirSource, expandDataDir, normalizeConfig, resolveDataDir } from '../lib/runtime.js'
+import { clearLocation, readLocation, readPointer, writeLocation } from '../lib/location.js'
+import { DEFAULTS, adoptDataDir, adoptPendingCopy, dataDirSource, expandDataDir, normalizeConfig, resolveDataDir } from '../lib/runtime.js'
 
 const HOME = path.join(os.tmpdir(), 'dshwc-home')
 
@@ -132,7 +132,7 @@ test('the panel choice beats the config, and clearing it falls back', () => {
   })
 })
 
-test('adoptDataDir creates the target, carries the CA over and remembers the choice', () => {
+test('adoptDataDir only records the choice; the CA is handed over at the next start', () => {
   withHome(() => {
     const current = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-cur-'))
     const target = path.join(os.tmpdir(), `dshwc-new-${Date.now()}`)
@@ -142,13 +142,26 @@ test('adoptDataDir creates the target, carries the CA over and remembers the cho
       }
       const result = adoptDataDir(current, target)
       assert.equal(result.ok, true)
-      assert.equal(result.caCopied, true)
+      assert.equal(result.caCopied, false)
+      assert.equal(result.copyOnStart, true)
       assert.equal(result.foreignCa, false)
       assert.equal(result.restartRequired, true)
       assert.equal(result.dir, target)
-      assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'stub:ca.crt')
+      // Nothing touched the disk: changing one's mind leaves no directory and
+      // no private-key copy behind.
+      assert.equal(fs.existsSync(target), false)
       assert.equal(readLocation(), target)
-      // The next process start resolves to the picked directory.
+      assert.equal(readPointer().copyFrom, current)
+
+      // The next start creates the directory and carries the CA over.
+      const adopted = adoptPendingCopy(target)
+      assert.equal(adopted.copied, true)
+      assert.equal(adopted.from, current)
+      assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'stub:ca.crt')
+      // The handover is one-shot.
+      assert.equal(readPointer().copyFrom, null)
+      assert.equal(adoptPendingCopy(target).copied, false)
+
       assert.equal(resolveDataDir(''), target)
       assert.equal(dataDirSource(''), 'ui')
     } finally {
@@ -168,7 +181,11 @@ test('adoptDataDir leaves an existing foreign CA alone', () => {
       fs.writeFileSync(path.join(target, 'ca.crt'), 'foreign')
       const result = adoptDataDir(current, target)
       assert.equal(result.caCopied, false)
+      assert.equal(result.copyOnStart, false)
       assert.equal(result.foreignCa, true)
+      assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'foreign')
+      // A foreign CA is nobody to hand over, and the next start leaves it alone.
+      assert.equal(adoptPendingCopy(target).copied, false)
       assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'foreign')
     } finally {
       clearLocation()

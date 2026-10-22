@@ -430,7 +430,7 @@ window.__ModuleLoader__.load({
             setMessage({ kind: 'ok', text: '已取消选择' })
           } else {
             const notes = [result.reset ? `已恢复默认数据目录：${result.dir}` : `数据目录 → ${result.dir}`]
-            if (result.caCopied) notes.push('现有 CA 已复制过去，不用重装证书')
+            if (result.copyOnStart) notes.push('现有 CA 会在重启时复制过去，不用重装证书')
             if (result.foreignCa) notes.push('新目录里已有一套 CA，若它没装进受信任根就要重新安装')
             if (result.restartRequired) notes.push('重启 DSH 后生效')
             setMessage({ kind: 'ok', text: notes.join('；') })

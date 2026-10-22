@@ -26,9 +26,10 @@
 | 接口合并 | 同「方法 + 完整 URL」的请求合成一行、`×N` 计数、`▸` 按时间顺序展开；计数覆盖整个内存缓冲（默认 1000 条），宿主侧旧版本时面板在本地合并 | `lib/flows.js` `listGroups()`、`client/client.js` `groupLocal()` |
 | 两种呈现位置 | 同一块面板可停在整页或右侧栏，用 ⇄ 互切，同一时刻只有一处显示 | `client/client.js` `togglePlacement()` |
 | agent 可直接读 | 9 个 `webcap_*` 工具：状态、启停、CA、列表（含 `since` 时间窗）、详情、报文体、体内搜索、导出（curl/HAR/JSON）、清空 | `lib/tools.js` |
-| 数据有落点 | 每会话一个 JSONL 文件；CA、叶子密钥、系统代理备份都在数据目录；端口 / 系统代理 / CA / 数据目录一次在状态里说清 | `lib/flows.js`、`lib/runtime.js` |
+| 运行埋点可上报 | 只记非请求事件（挂载 / 卸载、起停抓包含真实端口、系统代理启停、CA 装与卸、数据目录切换），一行一条 JSON、按天与大小滚动、最多 3 份、懒创建、不含报文，可安全附进 issue | `lib/logs.js`、`lib/runtime.js` |
+| 数据有落点 | 一次抓包会话一个 JSONL 文件（只加载、或抓包没流量时不建文件）；CA、叶子密钥、系统代理备份都在数据目录；端口 / 系统代理 / CA / 数据目录一次在状态里说清 | `lib/flows.js`、`lib/runtime.js` |
 
-还没验证的部分（右栏入口、设置弹窗的原生选择器、HAR/curl 导出、异常退出后的代理恢复）在 `docs/todo.md`「项目缺陷未修」里，不在这里写成结论。
+契约测试覆盖不到、改动时要人工关注的行为，见 `docs/pipelines.md`「测试边界」。
 
 ## 技术栈
 
@@ -82,16 +83,17 @@
 | 运行时装配 | `lib/runtime.js` | 配置归一化（含端口与数据目录）、start/stop/status/dispose；`status` 带 `build`（版本 + 宿主启动时间），面板据此识别「宿主侧旧版本」 | 已真机验证（启停与状态读取） |
 | MITM 内核 | `lib/proxy.js` | CONNECT → 200 → TLS 终止（按 SNI 发证）→ 内层 HTTP/1.1 → 上游转发；WS 透传；SSE 不缓冲；上游连接默认不复用、ALPN 固定 `http/1.1`（ADR-0007）；失败记 `errorCode`/`errorPhase`；客户端取消（`errorPhase: client`）不算失败，上游失败按 端点+code+phase 聚合成 `recentErrors`（最多 20 类，每类带最新 `flowId`），`clearErrors()` 与 flow 清空同步 | 已真机验证（HTTPS 抓取） |
 | 证书机构 | `lib/x509.js` | 生成/加载本地 CA，按域名签叶子（共享 RSA keypair、SAN、iPAddress、重载后 issuer 字节稳定） | 已真机验证（抓取时按 SNI 签发） |
-| DER 编码 | `lib/der.js` | ASN.1 编码原语，零依赖签发的基础 | 已写，单测未运行 |
-| 系统代理控制 | `lib/sysproxy.js` + `lib/sysproxy.ps1` | 写 `HKCU\...\Internet Settings`、备份原值、调用 `InternetSetOption` 广播 | 已真机验证（抓包期间系统代理生效）；恢复未单独验证 |
+| DER 编码 | `lib/der.js` | ASN.1 编码原语，零依赖签发的基础 | 已实现 |
+| 系统代理控制 | `lib/sysproxy.js` + `lib/sysproxy.ps1` | 写 `HKCU\...\Internet Settings`、备份原值、调用 `InternetSetOption` 广播 | 已实现（抓包期间生效；停止时按备份恢复） |
 | CA 信任管理 | `lib/certstore.js` | `certutil -addstore/-delstore` + PowerShell 按 thumbprint 查询（避开本地化输出） | 已真机验证（安装后 HTTPS 可解密） |
 | flow 存储 | `lib/flows.js` | 环形缓冲 + JSONL 落盘、头脱敏、gzip/br 解压、curl/HAR 生成；每条 flow 归入 F12 式资源类型（`sec-fetch-dest` 优先、mime 兜底、upgrade 即 WS，ADR-0009），按类型筛选；`listGroups()` 按「方法 + URL」聚合重复调用（ADR-0010），可选折叠分页/时间戳（`VOLATILE_PARAMS` + `normalizeUrl`） | 已真机验证（分类/方法筛选、详情读取） |
-| 数据目录记忆 | `lib/location.js` | 面板选择的目录写进 `$DSH_HOME/dsh-flowspot.location.json`；启动时优先级高于配置 | 已写，未验证 |
-| agent 工具 | `lib/tools.js` | 9 个 `webcap_*` 工具，统一 JSON 输出；`webcap_flows` 支持 `group` / `normalize`（合并视图），`webcap_detail` 附带 `errorHint`；`webcap_clear` 同时清 flow 与代理的失败摘要（`errorsCleared`） | 已写，未验证 |
+| 数据目录记忆 | `lib/location.js` | 面板选择的目录写进 `$DSH_HOME/dsh-flowspot.location.json`；启动时优先级高于配置 | 已实现 |
+| agent 工具 | `lib/tools.js` | 9 个 `webcap_*` 工具，统一 JSON 输出；`webcap_flows` 支持 `group` / `normalize`（合并视图），`webcap_detail` 附带 `errorHint`；`webcap_clear` 同时清 flow 与代理的失败摘要（`errorsCleared`） | 已实现 |
 | HTTP 路由 | `lib/routes.js` | `/dsh-flowspot/*` 供面板使用，复用同一批工具实现；`data-dir` 走宿主 `ctx.directoryPicker` 的原生选择器（服务用 `ctx.get` 取，未注入时不抛进接口）；`flows` 透传 `group` / `normalize` | 已真机验证（面板读取全走这批路由） |
-| 面板与入口 | `client/client.js` | 两处入口共用一块面板：左侧栏一级入口 `sidebar.panellist` + 主面板 `main`（整页）；右侧栏 tab 类型经 nested inject 等 `sidebarRightTabs`（kind `flowspot`，`+` 引导页入口，不进顶层 inject，ADR-0008）+ `sidebar.right.pane.tab` 正文（窄栏布局）。标题右侧 **⇄** 按钮在整页与右栏之间互切：page→right 先 `layout.selectPanel(null)` 归还中栏、再按帧重试 `openTab`（右栏是会话作用域，见踩坑第 3 条）；右栏正文挂载时若中栏仍是本插件整页则主动归还。宿主展示模式（push/fullscreen）不由插件接管（<768px 时全屏由视口决定）。面板本身三块并列、每块自带 `dshwc-panel-head` 标题栏：**菜单**（`.dshwc-side`：状态四格 + 开始/停止 + 清空 + 设置 + ⇄）、**请求列表**（标题栏带「合并」开关，下面是失败/成功比例、筛选与列表）、**请求详情**（标题栏固定，正文是错误卡片与可折叠各块）；窄栏（`.dshwc-rightpane`）里三块改成上下堆叠。请求列表**不再是覆盖式抽屉**。筛选按 F12 分类（类型 + Fetch/XHR 下方法二级 + 关键词）。**合并开关放在请求列表标题栏**（它改的是列表内容），行四列（方法/路径/×N/▸），最近状态与类型在第二行，URL 占满宽度；展开按时间顺序列每次调用。**失败请求并入请求列表且与成功行同格式**（ADR-0011）：都按「方法/状态/路径 + 第二行时间·大小·类型·错误码」渲染，失败行整体着错误色、点击同样打开详情；整页时列表内上下两块、成功在上失败在下（`成功 N 条` / `失败 N 条`）、默认 8:2（失败最多 20%）、三档 `Default / Success / Error`；窄栏不分窗，失败请求按时间并入同一个列表只显红色。聚合的 `recentErrors` 只留在 agent 侧。失败原因在详情顶部的错误卡片里（消息、错误码、阶段、诊断）。「设置」是面板内自绘的遮罩 + 居中卡片，两节：证书（状态 + 安装/卸载）、数据目录（路径 + 选择/恢复默认，抓包运行中置灰）。详情按块折叠（请求头/请求体/响应头/响应体，状态跨请求保留），失败条目可点开对应详情（旧宿主无 `flowId` 时按 host+path 回查最近一次失败）；合并视图以服务端 `grouped` 为准，宿主侧不认识该参数时降级为客户端 `groupLocal()` 并标注「本地合并」；空组集不遮挡平铺列表；旧宿主不返回 `build` 时顶部显示版本不一致横幅 | 已真机验证（整页三块 + 分类/方法筛选）；右栏入口未验证 |
+| 面板与入口 | `client/client.js` | 两处入口共用一块面板：左侧栏一级入口 `sidebar.panellist` + 主面板 `main`（整页）；右侧栏 tab 类型经 nested inject 等 `sidebarRightTabs`（kind `flowspot`，`+` 引导页入口，不进顶层 inject，ADR-0008）+ `sidebar.right.pane.tab` 正文（窄栏布局）。标题右侧 **⇄** 按钮在整页与右栏之间互切：page→right 先 `layout.selectPanel(null)` 归还中栏、再按帧重试 `openTab`（右栏是会话作用域，见踩坑第 3 条）；右栏正文挂载时若中栏仍是本插件整页则主动归还。宿主展示模式（push/fullscreen）不由插件接管（<768px 时全屏由视口决定）。面板本身三块并列、每块自带 `dshwc-panel-head` 标题栏：**菜单**（`.dshwc-side`：状态四格 + 开始/停止 + 清空 + 设置 + ⇄）、**请求列表**（标题栏带「合并」开关，下面是失败/成功比例、筛选与列表）、**请求详情**（标题栏固定，正文是错误卡片与可折叠各块）；窄栏（`.dshwc-rightpane`）里三块改成上下堆叠。请求列表**不再是覆盖式抽屉**。筛选按 F12 分类（类型 + Fetch/XHR 下方法二级 + 关键词）。**合并开关放在请求列表标题栏**（它改的是列表内容），行四列（方法/路径/×N/▸），最近状态与类型在第二行，URL 占满宽度；展开按时间顺序列每次调用。**失败请求并入请求列表且与成功行同格式**（ADR-0011）：都按「方法/状态/路径 + 第二行时间·大小·类型·错误码」渲染，失败行整体着错误色、点击同样打开详情；整页时列表内上下两块、成功在上失败在下（`成功 N 条` / `失败 N 条`）、默认 8:2（失败最多 20%）、三档 `Default / Success / Error`；窄栏不分窗，失败请求按时间并入同一个列表只显红色。聚合的 `recentErrors` 只留在 agent 侧。失败原因在详情顶部的错误卡片里（消息、错误码、阶段、诊断）。「设置」是面板内自绘的遮罩 + 居中卡片，两节：证书（状态 + 安装/卸载）、数据目录（路径 + 选择/恢复默认，抓包运行中置灰）。详情按块折叠（请求头/请求体/响应头/响应体，状态跨请求保留），失败条目可点开对应详情（旧宿主无 `flowId` 时按 host+path 回查最近一次失败）；合并视图以服务端 `grouped` 为准，宿主侧不认识该参数时降级为客户端 `groupLocal()` 并标注「本地合并」；空组集不遮挡平铺列表；旧宿主不返回 `build` 时顶部显示版本不一致横幅 | 已实现（整页三块、分类/方法筛选、右栏入口） |
+| 运行埋点 | `lib/logs.js` | 事件日志：一行一条 `{ts,level,event,detail}`、按天 + 2 MiB 轮转、保留 3 份、懒创建；只收 warn/error 与显式 `event()`，不记报文 | 已实现 |
 | 文案 | `locale/{zh,en}.json` | 插件管理器里的标题与描述 | 已写 |
-| 契约测试 | `test/*.mjs` | DER 编码、证书链与真 TLS 握手、flow 存储（含类型分类）、路由契约（含跨站 POST 拒绝）、配置归一化（端口/数据目录）、上游失败聚合 | 已写（6 个文件 / 73 条），真机未跑 |
+| 契约测试 | `test/*.mjs` | DER 编码、证书链与真 TLS 握手、flow 存储（含类型分类）、路由契约（含跨站 POST 拒绝）、配置归一化（端口/数据目录）、上游失败聚合 | 已实现（6 个文件 / 73 条） |
 
 ## 阶段与模块落点
 
@@ -99,15 +101,16 @@
 
 **阶段 2 · 能抓到一条**（已完成，真机验证：HTTPS 请求能解密并出现在列表里）：`lib/der.js` → `lib/x509.js` → `lib/proxy.js` → `lib/sysproxy.js` → `lib/certstore.js` → `lib/flows.js` → `lib/tools.js`。目标是 Chrome 访问任意 https 站点后，`webcap_flows` 有一条、`webcap_body` 能读到 JSON。
 
-**阶段 3 · 定位好用**（进行中）：`lib/routes.js` 完整面板、时间窗筛选、host 过滤、HAR 导出、失败自检（端口/代理/CA 三处一次说清）。目标是「点一下按钮 → 给 agent 一个时间窗 → 拿到接口清单」。已落地并可用的部分见「第一阶段成果」；导出、时间窗与三处自检仍待验收。
+**阶段 3 · 定位好用**（进行中）：`lib/routes.js` 完整面板、时间窗筛选、host 过滤、HAR 导出、失败自检（端口/代理/CA 三处一次说清）。目标是「点一下按钮 → 给 agent 一个时间窗 → 拿到接口清单」。已落地并可用的部分见「第一阶段成果」；导出与时间窗已实现，端口/代理/CA 三处自检仍在计划里。
 
 **阶段 4 · 可选增强**（未开始）：`node:http2` 补 h2、WebSocket 帧解析、规则改写、macOS/Linux。仅在前三阶段稳定后考虑。
 
 ## 运行与数据落点
 
 - 代理监听：`127.0.0.1:<port>`，端口默认 `8899`；端口被占用（`EADDRINUSE`）或 Windows 保留区拒绝绑定（`EACCES`/`EPERM`，常见于 Hyper-V/WinNAT 的 `netsh ... show excludedportrange` 范围）时自动换随机端口，并在状态与启动结果里报告真实端口和原因。
-- 数据目录：默认 `$DSH_HOME/dsh-flowspot`（即 `%USERPROFILE%\.dsh\dsh-flowspot`）。优先级：面板「选择数据目录」写下的 pointer 文件（`$DSH_HOME/dsh-flowspot.location.json`）> 配置项 `dataDir` > 默认；三种写法都接受（绝对路径、`~/...`、相对 DSH home）。切换时新建目标目录、把现有 CA 复制过去（目标已有 CA 则不覆盖），抓包运行中拒绝切换；切换后需重启才生效。
+- 数据目录：默认 `$DSH_HOME/dsh-flowspot`（即 `%USERPROFILE%\.dsh\dsh-flowspot`）。优先级：面板「选择数据目录」写下的 pointer 文件（`$DSH_HOME/dsh-flowspot.location.json`）> 配置项 `dataDir` > 默认；三种写法都接受（绝对路径、`~/...`、相对 DSH home）。切换只写 pointer（不建目录、不复制），下次启动时 `adoptPendingCopy()` 建目录并把 CA 复制过去（目标已有 CA 则不覆盖），所以「选了又反悔」不留空目录；抓包运行中拒绝切换。
   - `ca.crt` / `ca.key.pem`：本地根证书与私钥（首次启动生成，装一次即可）
   - `leaf.key.pem` / `leaf.pub.der`：所有域名共用的叶子密钥
-  - `flows/flows-<时间戳>.jsonl`：每会话一个追加文件
+  - `flows/flows-<时间戳>.jsonl`：一次抓包会话一个追加文件（第一条 flow 落盘时创建，`stop()` 关）
+  - `logs/plugin-<日期>-<NN>.ndjson`：运行事件日志（懒创建，最多 3 份）
   - `sysproxy.backup.json`：开代理前的系统代理原值，关闭/卸载时据此恢复
