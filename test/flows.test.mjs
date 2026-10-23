@@ -1,8 +1,7 @@
 /**
- * Flow store: the contract every reader depends on — ring eviction, filtering,
- * body previews (decompress / truncate / base64), redaction, JSONL append,
- * curl and HAR rendering.
- * Run with: node test/flows.test.mjs
+ * flow 存储：面板和工具等所有读取方共同依赖的契约——环形淘汰、筛选、
+ * 响应体预览（解压 / 截断 / base64）、打码、JSONL 追加，以及 curl 与 HAR 渲染。
+ * 运行：node test/flows.test.mjs
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -41,7 +40,7 @@ function finishJson(s, flow, text = '{"name":"ada"}') {
   return flow
 }
 
-test('begin assigns sequential ids and masks sensitive request headers', () => {
+test('begin assigns sequential ids; redaction is opt-in, so headers stay intact by default', () => {
   const s = store()
   const flow = s.begin({
     method: 'POST',
@@ -57,22 +56,23 @@ test('begin assigns sequential ids and masks sensitive request headers', () => {
   })
   assert.equal(flow.id, 'f1')
   assert.equal(flow.seq, 1)
-  // Header names are lower-cased so filtering and rendering never miss a case.
-  assert.equal(flow.reqHeaders.authorization, '***redacted***')
-  assert.equal(flow.reqHeaders.cookie, '***redacted***')
-  assert.equal(flow.reqHeaders['x-api-key'], '***redacted***')
+  // 请求头名字统一转小写，筛选和渲染时才不会因为大小写漏掉。默认不打码，头值原样保留。
+  assert.equal(flow.reqHeaders.authorization, 'Bearer secret')
+  assert.equal(flow.reqHeaders.cookie, 'sid=1')
+  assert.equal(flow.reqHeaders['x-api-key'], 'k')
   assert.equal(flow.reqHeaders.accept, 'application/json')
 })
 
-test('redact=false keeps credentials intact for local debugging', () => {
-  const s = store({ redact: false })
+test('redact=true masks credentials when the operator asks for it', () => {
+  const s = store({ redact: true })
   const flow = seed(s, { reqHeaders: { authorization: 'Bearer secret' } })
   s.finish(flow, { status: 200, headers: {}, body: Buffer.alloc(0) })
-  assert.equal(flow.reqHeaders.authorization, 'Bearer secret')
+  assert.equal(flow.reqHeaders.authorization, '***redacted***')
 })
 
+// 环形淘汰只丢最老的 flow，并把丢弃数记在 dropped 上，面板才知道列表被截过。
 test('the ring drops the oldest flow and counts every drop', () => {
-  // maxFlows is clamped to a floor of 50, so 55 flows leave 50 and drop 5.
+  // maxFlows 有 50 的下限（防止配置写成 0 把列表锁死），所以放 55 条只剩 50 条、丢 5 条。
   const s = store({ maxFlows: 50 })
   for (let i = 0; i < 55; i++) {
     finishJson(s, seed(s, { path: `/n/${i}`, url: `https://api.example.com/n/${i}` }))
@@ -98,37 +98,38 @@ test('list filters by host, method, status, url keyword and seq window, newest f
   assert.deepEqual(s.list({ method: 'post', limit: 10 }).map((f) => f.id), ['f2'])
   assert.deepEqual(s.list({ status: 401, limit: 10 }).map((f) => f.id), ['f2'])
   assert.deepEqual(s.list({ q: 'orders', limit: 10 }).map((f) => f.id), ['f3'])
-  // since is exclusive: everything newer than f1.
+  // since 是排他的：只取比 f1 新的。
   assert.deepEqual(s.list({ since: 1, limit: 10 }).map((f) => f.id), ['f3', 'f2'])
   assert.equal(s.list({ limit: 10 })[0].url, 'https://a.example.com/orders')
 })
 
 test('the panel type filter classifies like F12: sec-fetch-dest first, mime as fallback', () => {
   const s = store()
-  // Browser request: Chrome's own hint decides the group.
+  // 浏览器请求：优先用 Chrome 自己给的 sec-fetch-dest 归组。
   finishJson(s, seed(s, { reqHeaders: { 'sec-fetch-dest': 'script' } }), 'console.log(1)')
-  // No hint (curl, older clients): the response mime decides.
+  // 没有提示头（curl、老客户端）：退回按响应 mime 判断。
   s.finish(seed(s, { path: '/logo.png', url: 'https://a.example.com/logo.png', reqHeaders: {} }), {
     status: 200,
     headers: { 'content-type': 'image/png' },
     body: Buffer.from('png'),
   })
-  // WebSocket handshake wins over any mime guess.
+  // 一旦是 WebSocket 升级，就不再猜 mime，直接归到 ws。
   finishJson(s, seed(s, { reqHeaders: { upgrade: 'websocket', connection: 'Upgrade' } }))
 
   assert.equal(resourceTypeOf(s.get('f1')), 'js')
   assert.equal(resourceTypeOf(s.get('f2')), 'img')
   assert.equal(resourceTypeOf(s.get('f3')), 'ws')
-  // A request with neither a hint nor a response yet cannot be classified.
+  // 既没有提示头、响应也还没到的请求没法分类，落到 other。
   assert.equal(resourceTypeOf({ method: 'GET', reqHeaders: {}, mime: '' }), 'other')
 
   assert.deepEqual(s.list({ type: 'img', limit: 10 }).map((f) => f.id), ['f2'])
   assert.deepEqual(s.list({ type: 'ws', limit: 10 }).map((f) => f.id), ['f3'])
   assert.deepEqual(s.list({ type: 'all', limit: 10 }).map((f) => f.id), ['f3', 'f2', 'f1'])
-  // Unknown group names never silently match everything.
+  // 不认识的类型名不会悄悄变成「全匹配」，必须返回空。
   assert.deepEqual(s.list({ type: 'nope', limit: 10 }), [])
 })
 
+// 搜索要同时回「命中在哪（where）」和一小段片段，面板才能跳到正确字段并高亮。
 test('search reports where the match was and keeps a snippet', () => {
   const s = store()
   const flow = seed(s, {
@@ -152,11 +153,12 @@ test('search reports where the match was and keeps a snippet', () => {
   const headerHit = s.search({ q: 'trace-42', scope: 'all' })
   assert.deepEqual(headerHit[0].where, ['header'])
 
-  // scope=url must not look at headers or bodies.
+  // scope=url 只在 URL 里找，不能顺手去翻头和体。
   assert.equal(s.search({ q: 'trace-42', scope: 'url' }).length, 0)
   assert.equal(s.search({ q: 'https://auth.example.com', scope: 'body' }).length, 0)
 })
 
+// 预览前必须先把压缩体解开，否则 gzip 的响应在面板里永远是一屏乱码。
 test('describeBody decompresses gzip, deflate and brotli before previewing', () => {
   const text = '{"ok":true}'
   const gzip = describeBody(zlib.gzipSync(Buffer.from(text)), { 'content-type': 'application/json', 'content-encoding': 'gzip' }, 4096)
@@ -183,11 +185,12 @@ test('describeBody truncates to the cap and keeps binary as base64', () => {
   assert.equal(binary.text, null)
   assert.equal(binary.base64, Buffer.from([0x00, 0x01, 0xff]).toString('base64'))
 
-  // A body without a content-type is sniffed: NUL bytes mean binary.
+// 截断只影响预览文本，bytes 仍要报真实大小；没有 content-type 时靠内容嗅探：出现 NUL 字节就按二进制处理。
   assert.equal(describeBody(Buffer.from([0x00, 0x41]), {}, 4096).text, null)
   assert.equal(describeBody(Buffer.from('plain text'), {}, 4096).text, 'plain text')
 })
 
+// 请求体另有 64 KiB 的硬上限，把 maxBodyBytes 配大也不会放宽——防的是大上传把内存撑爆。
 test('request bodies are capped at 64 KiB even when maxBodyBytes is larger', () => {
   const s = store({ maxBodyBytes: 10 * 1024 * 1024 })
   const flow = seed(s, { reqHeaders: { 'content-type': 'text/plain' } })
@@ -197,6 +200,7 @@ test('request bodies are capped at 64 KiB even when maxBodyBytes is larger', () 
   assert.equal(flow.reqBody.bytes, 100000)
 })
 
+// finish 除了更新内存里的 flow，还要保证每次恰好追加一行 JSONL（不多不少，重放才对得上）。
 test('finish records status, mime, size, error and appends one JSONL line', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-flows-'))
   const s = store({ persistDir: dir })
@@ -220,7 +224,7 @@ test('finish records status, mime, size, error and appends one JSONL line', asyn
   const parsed = JSON.parse(lines[0])
   assert.equal(parsed.id, 'f1')
   assert.equal(parsed.status, 201)
-  // On-disk previews are shorter than memory: 32 KiB per side.
+  // 落盘的预览比内存里更短：每边只留 32 KiB，控制 JSONL 体积。
   assert.equal(parsed.respBody.text.length, 32768)
 
   const failed = seed(s)
@@ -228,6 +232,7 @@ test('finish records status, mime, size, error and appends one JSONL line', asyn
   assert.equal(failed.error, 'ECONNRESET')
 })
 
+// hop-by-hop 头（content-length / host / connection）由 curl 自己生成，重复带上反而出错。
 test('curlOf reproduces headers and body, skips hop-by-hop headers and escapes quotes', () => {
   const s = store()
   const flow = seed(s, {
@@ -254,6 +259,7 @@ test('curlOf reproduces headers and body, skips hop-by-hop headers and escapes q
   assert.doesNotMatch(cmd, /proxy-connection/i)
 })
 
+// HAR 1.2 的结构是死的：二进制响应只能走 base64，二进制请求则不能塞 postData。
 test('harOf emits HAR 1.2 entries, base64 for binary and no postData for binary requests', () => {
   const s = store()
   const textual = seed(s, { url: 'https://api.example.com/a?b=1&b=2' })
@@ -286,8 +292,8 @@ test('harOf emits HAR 1.2 entries, base64 for binary and no postData for binary 
 test('binary responses round-trip through HAR as base64', () => {
   const s = store()
   const flow = seed(s)
-  // `looksTextual` keys on NUL/control bytes, and a bare 4-byte PNG magic is
-  // ASCII enough to pass as text — so the sample carries a NUL on purpose.
+  // `looksTextual` 只看 NUL/控制字节，而 PNG 魔数不过是几个 ASCII 字节，很容易被当成文本，
+  // 所以这里故意在样本里放一个 NUL，保证确实走到 base64 分支。
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x1a, 0x0a])
   s.finish(flow, { status: 200, headers: { 'content-type': 'image/png' }, body: bytes })
   const entry = harEntryOf(flow)
@@ -330,8 +336,7 @@ test('an error keeps its code and phase so "socket hang up" becomes diagnosable'
   assert.equal(failed.errorPhase, 'upstream')
   assert.equal(summaryOf(failed).errorCode, 'ECONNRESET')
 
-  // Without an explicit code the error's own `code` is used, and a plain string
-  // error keeps both fields null.
+  // 没显式给 errorCode 时用 error 自带的 code；而一个普通的字符串错误两个字段都保持 null。
   const fromError = seed(s)
   const reset = new Error('read ECONNRESET')
   reset.code = 'ECONNRESET'
@@ -345,6 +350,7 @@ test('an error keeps its code and phase so "socket hang up" becomes diagnosable'
   assert.equal(plain.errorPhase, 'client')
 })
 
+// 清空之后 store 还得能继续用，seq 接着往下涨而不是从 1 重来，否则新 flow 会撞上旧 id。
 test('clear empties the ring and the store stays usable afterwards', () => {
   const s = store()
   finishJson(s, seed(s))
@@ -357,6 +363,7 @@ test('clear empties the ring and the store stays usable afterwards', () => {
   s.close()
 })
 
+// 合并的粒度是「方法 + 完整 URL」：同一个轮询地址折成一行，计 ×3 并保留每次出现。
 test('grouping folds a polling endpoint into one row with its occurrences', () => {
   const s = store()
   for (let i = 0; i < 3; i++) {
@@ -371,10 +378,10 @@ test('grouping folds a polling endpoint into one row with its occurrences', () =
   const groups = s.listGroups({ limit: 10 })
   assert.equal(groups.length, 2)
 
-  const poll = groups.find((g) => g.path === '/api/v2/collect')
+  const poll = groups.find((g) => g.path === '/v2/poll')
   assert.equal(poll.count, 3)
   assert.equal(poll.items.length, 3)
-  // Newest first, like the flat list, with the oldest kept as `first`.
+  // 成员按新的在前排，跟平铺列表一致；最老的那条留在 first 里。
   assert.deepEqual(poll.items.map((item) => item.id), ['f3', 'f2', 'f1'])
   assert.equal(poll.latest.id, 'f3')
   assert.equal(poll.first.id, 'f1')
@@ -388,6 +395,7 @@ test('grouping folds a polling endpoint into one row with its occurrences', () =
   assert.equal(failure.statuses.ERR, 1)
 })
 
+// maxItems 只截成员列表，count 必须仍是真实总数，否则面板上的「×N」会撒谎。
 test('grouping keeps filters and caps the member list', () => {
   const s = store()
   for (let i = 0; i < 5; i++) finishJson(s, seed(s, { url: 'https://a.example.com/poll' }))
@@ -406,12 +414,13 @@ test('normalizeUrl folds polling parameters and keeps identifying ones', () => {
   assert.equal(normalizeUrl('https://a.example.com/x?_t=123'), 'https://a.example.com/x')
   assert.equal(normalizeUrl('https://a.example.com/x?page=2&pageSize=20'), 'https://a.example.com/x')
   assert.equal(normalizeUrl('https://a.example.com/x?id=7&_t=1'), 'https://a.example.com/x?id=7')
-  // Surviving parameters are sorted so their order cannot split a group.
+  // 保留下来的参数会排序，免得同一组因为参数顺序不同被拆开。
   assert.equal(normalizeUrl('https://a.example.com/x?b=2&a=1'), 'https://a.example.com/x?a=1&b=2')
-  // An unparseable URL is returned unchanged.
+  // 解析不了的 URL 原样返回，不抛错——被合并的永远只是合法 URL。
   assert.equal(normalizeUrl('not a url'), 'not a url')
 })
 
+// normalize=false 时三个 _t 变体就是三个 URL；开了 normalize 才并成一行。
 test('normalized grouping merges URLs that differ only by volatile parameters', () => {
   const s = store()
   for (const t of ['1', '2', '3']) {
