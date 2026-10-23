@@ -40,7 +40,7 @@
 | 层 | 选择 | 说明 |
 |---|---|---|
 | 宿主 | DeepSeek Harness / cordis | 插件以 `apply(ctx, config)` 形态加载；用 `ctx.inject(['webServer','tools'])` 取服务，`ctx.effect` 管注册与卸载 |
-| 运行时 | Node.js ≥ 22，ESM | 与宿主同进程；**零构建**，loader 直接 import `index.js` |
+| 运行时 | Node.js ≥ 20，ESM | 与宿主同进程；**零构建**，loader 直接 import `index.js`。插件本身只用稳定 API（无 Node 21+ 专属调用），所以桌面端（Electron 的 Node 20.x）也能装能跑；运行时仍以宿主为准 |
 | 语言 | JavaScript + JSDoc 类型注释 | 不用 TypeScript，理由见 ADR-0006 |
 | 辅助脚本 | PowerShell（`lib/sysproxy.ps1`） | 只有一件事：P/Invoke `InternetSetOption` 广播代理变更 |
 | 网络与加密 | `node:net` / `node:tls` / `node:http` / `node:https` / `node:crypto` / `node:zlib` / `node:stream` | MITM、签名、解压、流式转发全部走标准库 |
@@ -90,6 +90,7 @@
 | 证书机构 | `lib/x509.js` | 生成/加载本地 CA，按域名签叶子（共享 RSA keypair、SAN、iPAddress、重载后 issuer 字节稳定） | 已真机验证（抓取时按 SNI 签发） |
 | DER 编码 | `lib/der.js` | ASN.1 编码原语，零依赖签发的基础 | 已实现 |
 | 系统代理控制 | `lib/sysproxy.js` + `lib/sysproxy.ps1` | 写 `HKCU\...\Internet Settings`、备份原值、调用 `InternetSetOption` 广播 | 已实现（抓包期间生效；停止时按备份恢复） |
+| 系统命令解析 | `lib/sysbin.js` | `certutil` / `powershell` / `reg` / `explorer` / `taskkill` 优先解析成 `%SystemRoot%\System32` 下的绝对路径，文件不在才退回裸命令名。GUI 启动的进程 PATH 常被裁剪（Electron 打包的桌面端典型），拿不到 `certutil` 表现就是「CA 装不上、系统代理改不动」 | 已实现 |
 | CA 信任管理 | `lib/certstore.js` | `certutil -addstore/-delstore` + PowerShell 按 thumbprint 查询（避开本地化输出） | 已真机验证（安装后 HTTPS 可解密） |
 | flow 存储 | `lib/flows.js` | 环形缓冲 + JSONL 落盘、头打码（可选）、gzip/br 解压、HAR 生成；curl 交给代码生成器；每条 flow 归入 F12 式资源类型（`sec-fetch-dest` 优先、mime 兜底、upgrade 即 WS，ADR-0009），按类型筛选；`listGroups()` 按「方法 + URL」聚合重复调用（ADR-0010），可选折叠分页/时间戳（`VOLATILE_PARAMS` + `normalizeUrl`） | 已真机验证（分类/方法筛选、详情读取） |
 | 代码生成 | `lib/codegen/*` | `request.js` 把一个 flow 归一成 `RequestSpec`（查询参数、cookie 对、体类型 json/form/multipart/text/binary、丢弃 hop-by-hop 头、打码与截断提示）；6 个语言渲染器（`curl/python/go/rust/javascript/node`）共用它；`prefs.js` 读写 `$DSH_HOME/dsh-flowspot.codegen.json` 的顺序与显隐；CDP 抓到的请求由 `CdpChannel.codeFlowOf()` 拼成同一个 flow 形状，所以两条通道的「代码」页完全一致（`webcap_code` 的 `cdp` 参数、`/cdp/code` 路由） | 已实现（新增 `test/codegen.test.mjs`） |
@@ -101,7 +102,7 @@
 | 面板与入口 | `client/client.js` | 两处入口共用一块面板：左侧栏一级入口 `sidebar.panellist` + 主面板 `main`（整页）；右侧栏 tab 类型经 nested inject 等 `sidebarRightTabs`（kind `flowspot`，`+` 引导页入口，不进顶层 inject，ADR-0008）+ `sidebar.right.pane.tab` 正文（窄栏布局）。标题右侧 **⇄** 按钮在整页与右栏之间互切：page→right 先 `layout.selectPanel(null)` 归还中栏、再按帧重试 `openTab`（右栏是会话作用域，见踩坑第 3 条）；右栏正文挂载时若中栏仍是本插件整页则主动归还。宿主展示模式（push/fullscreen）不由插件接管（<768px 时全屏由视口决定）。面板本身三块并列、每块自带 `dshwc-panel-head` 标题栏：**菜单**（`.dshwc-side`：状态四格 + 开始/停止 + 清空 + 设置 + ⇄，CDP 模式多一行显示源码落盘占用）、**请求列表**（标题栏带「合并」开关，下面是失败/成功比例、筛选与列表）、**请求详情**（标题栏固定，正文是错误卡片与可折叠各块）；窄栏（`.dshwc-rightpane`）里三块改成上下堆叠。请求列表**不再是覆盖式抽屉**。筛选按 F12 分类（类型 + Fetch/XHR 下方法二级 + 关键词）。**合并开关放在请求列表标题栏**（它改的是列表内容），行四列（方法/路径/×N/▸），最近状态与类型在第二行，URL 占满宽度；展开按时间顺序列每次调用。**失败请求并入请求列表且与成功行同格式**（ADR-0011）：都按「方法/状态/路径 + 第二行时间·大小·类型·错误码」渲染，失败行整体着错误色、点击同样打开详情；整页时列表内上下两块、成功在上失败在下（`成功 N 条` / `失败 N 条`）、默认 8:2（失败最多 20%）、三档 `Default / Success / Error`；窄栏不分窗，失败请求按时间并入同一个列表只显红色。聚合的 `recentErrors` 只留在 agent 侧。失败原因在详情顶部的错误卡片里（消息、错误码、阶段、诊断）。「设置」是面板内自绘的遮罩 + 居中卡片，五节：证书（状态 + 安装/卸载）、数据目录（路径 + 选择/恢复默认，抓包运行中置灰）、代码语言（可见性 + 顺序，立即生效）、浏览器扩展（下载 zip / 打开目录 / 安装引导 / 接管当前页 / 断开）、运行日志（只打开日志文件夹）。**系统抓包与 CDP 抓包共用同一套详情**：「请求 / 代码」两页、同一个语言 chips 与生成器——「请求」页在系统侧是错误卡片 + 四个可折叠块 + 顶部「调用链（CDP）」块，在 CDP 侧是请求头/POST 体/响应头/调用链；「代码」页两侧完全一致（语言 chips + `<pre>` + 复制按钮 + 打码/截断/依赖说明）。详情按块折叠（请求头/请求体/响应头/响应体，状态跨请求保留），失败条目可点开对应详情（旧宿主无 `flowId` 时按 host+path 回查最近一次失败）；合并视图以服务端 `grouped` 为准，宿主侧不认识该参数时降级为客户端 `groupLocal()` 并标注「本地合并」；空组集不遮挡平铺列表；旧宿主不返回 `build` 时顶部显示版本不一致横幅 | 已实现（整页三块、分类/方法筛选、右栏入口） |
 | 运行埋点 | `lib/logs.js` | 事件日志：一行一条 `{ts,level,event,detail}`、按天 + 2 MiB 轮转、保留 3 份、懒创建；只收 warn/error 与显式 `event()`，不记报文 | 已实现 |
 | 文案 | `locale/{zh,en}.json` | 插件管理器里的标题与描述 | 已写 |
-| 契约测试 | `test/*.mjs` | DER 编码、证书链与真 TLS 握手、flow 存储（含类型分类）、代码生成（请求模型/6 语言/语言偏好）、CDP（client id 匹配/网络配对/参数/脚本窗口/启动参数/通道拼链/桥接回包/调用链帧过滤/异步段展平与匿名帧判噪声/抓取时脚本落盘与超限跳过/业务接口筛选（埋点与风控探针不落）/失败只重试一次/源码片段展开（窗口对齐语句边界、区分块与对象默认值）与按列按行两种窗口/同名方法翻页/打开源码所在文件夹/CDP 请求转脚本/断开保留历史/优先带栈条目/暂停保留数据）、日志读取（过滤/坏行/轮转文件）、ZIP 打包、路由契约（含桥接/扩展/跨站 POST、5MB 脚本回包不被掐断）、配置归一化（端口/数据目录）、上游失败聚合 | 已实现（10 个文件 / 124 条） |
+| 契约测试 | `test/*.mjs` | DER 编码、证书链与真 TLS 握手、flow 存储（含类型分类）、代码生成（请求模型/6 语言/语言偏好）、CDP（client id 匹配/网络配对/参数/脚本窗口/启动参数/通道拼链/桥接回包/调用链帧过滤/异步段展平与匿名帧判噪声/抓取时脚本落盘与超限跳过/业务接口筛选（埋点与风控探针不落）/失败只重试一次/源码片段展开（窗口对齐语句边界、区分块与对象默认值）与按列按行两种窗口/同名方法翻页/打开源码所在文件夹/CDP 请求转脚本/断开保留历史/优先带栈条目/暂停保留数据）、日志读取（过滤/坏行/轮转文件）、ZIP 打包、路由契约（含桥接/扩展/跨站 POST、5MB 脚本回包不被掐断）、配置归一化（端口/数据目录）、上游失败聚合 | 已实现（11 个文件 / 126 条） |
 
 ## 阶段与模块落点
 

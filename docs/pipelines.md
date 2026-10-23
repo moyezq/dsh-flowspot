@@ -284,6 +284,7 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 - `test/routes.test.mjs`（31）：28 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`code`/`code-prefs`、CDP 六条路由（含 `cdp/code` 转脚本与 `cdp/reveal` 打开位置）、5MB 脚本回包不被掐断、日志一条、桥接五条与扩展两条、`clear` 清 `recentErrors`、跨站 POST 被拒。
 - `test/runtime.test.mjs`（14）：`normalizeConfig`（含 `cdpBrowserPath`）、数据目录优先级与 `expandDataDir`、`adoptDataDir` 的复制与拒绝。
 - `test/proxy.test.mjs`（3）：`parseHead` 跨块解析、`_noteError` 聚合与上限。
+- `test/sysbin.test.mjs`（2）：系统命令优先解析成 `%SystemRoot%\System32` 下的绝对路径（带不带 `.exe` 都认、支持自定义 SystemRoot），文件不在 / 非 Windows / 不在白名单时退回原样，空命令名直接报错。
 - 全部零依赖；单个文件直接 `node test/<file>.mjs`（`node --test test/` 会为每个文件起子进程，在受限沙箱里可能 `spawn EPERM`）。真实 TLS 用例依赖本机 Node ≥ 22 的 `crypto`；CDP 用例不启动浏览器，真实 Chrome 的行为要人工验收。
 
 契约测试覆盖不到、改这些行为时要人工关注：

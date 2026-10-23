@@ -64,6 +64,8 @@ dsh plugin --profile web add "<本仓绝对路径>"
 
 发布到 npm 之后同理，把绝对路径换成包名：`dsh plugin --profile web add dsh-flowspot`。
 
+**DSH Desktop（桌面端）**：装法走桌面应用自己的**插件页**，不要用命令行——`dsh plugin --profile desktop` 被宿主明确禁止（`profile "desktop" is managed exclusively by the Electron application`）。运行能力与 web 一致：桌面端跑的就是同一套 `dsh-web-app`，宿主半区照常挂路由、面板半区照常加载，CA 与系统代理仍走当前用户级操作、不需要管理员。
+
 跑测试（纯 Node，不需要 DSH，也不需要先装插件）：
 
 ```powershell
