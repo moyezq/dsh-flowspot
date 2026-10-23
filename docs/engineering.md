@@ -6,6 +6,11 @@
 - [点「选择数据目录」只报「操作失败」，为什么？](#2-点选择数据目录只报操作失败为什么)
 - [从整页切右侧栏报「没有会话」，右栏一开就盖住整窗？](#3-从整页切右侧栏报没有会话右栏一开就盖住整窗)
 - [点「接口合并」之后请求列表变空？](#4-点接口合并之后请求列表变空)
+- [失败列表点不动、「清空」清不掉它？](#5-失败列表点不动清空清不掉它)
+- [F12 里有一整列方法名，插件的调用链只有 3 帧？](#6-f12-里有一整列方法名插件的调用链只有-3-帧)
+- [脚本怎么滚都抓不到首页的 homefeed？](#7-脚本怎么滚都抓不到首页的-homefeed)
+- [点调用链的帧，提示「找不到脚本 / js 文件不存在」？](#8-点调用链的帧提示找不到脚本-js-文件不存在)
+- [落盘大脚本时报「CDP 命令超时：Debugger.getScriptSource」？](#9-落盘大脚本时报cdp-命令超时debuggergetscriptsource)
 
 ---
 
@@ -147,4 +152,119 @@ client bundle 是页面加载时从包目录取的，**宿主侧代码是进程�
 `_noteError` 写入 / 更新 `flowId`；`MitmProxy.clearErrors()` 同时清 `lastError`；`webcap_clear` 返回 `errorsCleared`。面板侧：条目加 `dshwc-err-click`，点击 `openDetail(flowId)`，对应 flow 已被挤出缓冲时提示重抓。
 
 旧宿主（只有面板是新的）下这两件事都做不到，所以面板再兜一层：点「清空」时记下时间戳，隐藏早于该时间的失败条目（清空之后新发生的失败照常出现）；`webcap_clear` 没返回 `errorsCleared` 时提示「服务端摘要要重启 DSH 才会清」。落点：`client/client.js`。
+
+---
+
+## 6. F12 里有一整列方法名，插件的调用链只有 3 帧？
+
+### 出了什么问题
+
+详情里的「调用链」只有三帧，全是 `(anonymous)` 和 `_ace_b30`，业务方法 chips 永远是空的；F12 的 Initiator 里同一条请求却有几十行，左侧能看到 `fetchFeeds`、`postApiSnsWebV1Homefeed` 这些名字。
+
+### 当时的情况
+
+扩展桥接管小红书的首页标签页，CDP 列表里 `homefeed` 抓得到、头与 POST 体也对。用一条浏览器级 CDP 连接复抓同一条请求、把 `Network.requestWillBeSent` 的 `initiator` 整个落盘，才看清结构：`stack.callFrames` 只有 3 帧，其余 42 帧在 `stack.parent` 串起的 4~6 层里（合计 45 帧 / 7 段 / 22 个函数名）。
+
+### 为什么会这样
+
+两处独立的读取缺陷叠在一起。① `initiator.stack.callFrames` 只是**同步段**，浏览器把「谁调起了这段」放在 `parent` 链里，而插件只读过 `callFrames`。② 噪声名单按 `functionName` 比对，CDP 给匿名函数的是空字符串 `""`，名单里写的却是字面量 `'(anonymous)'`——匿名帧永远不算噪声，`filteredFrames` 只命中 `_ace_*`，于是列表「发起于」与 chips 都被一排无名帧占住。
+
+### 试过哪些办法
+
+先怀疑扩展桥丢数据：从宿主 `/dsh-flowspot/cdp/request` 拉插件自己采的那条，`totalFrames=3`，三帧与浏览器直连抓到的前 3 帧逐字节一致——不是传输丢，是没往下读。又试 `Debugger.setAsyncCallStackDepth`：64 时 45 帧 / 7 段，0 时 41 帧 / 4 段，父栈本身仍在，说明它只决定尾部几层、不是拿到方法名的前提；`Network.setAttachDebugStack` 开与关在这条链路上没测出差异。
+
+### 最后怎么解决
+
+`lib/cdp/initiator.js` 加 `flattenFrames(stack)`：先 `callFrames`，再沿 `stack.parent` 逐层续上（上限 8 层），每帧带 `asyncLevel` / `anonymous`，匿名帧按空名判噪声；`network.js` 与 `index.js` 改读展平帧（一并返回 `totalFrames` / `syncFrames` / `asyncLevels`），列表「发起于」取第一个业务帧，面板按段插 `Continue async` 分隔；受控浏览器路径的 `_attachSession()` 补 `Debugger.setAsyncCallStackDepth(64)` 与扩展桥对齐。`parentId` 形式今天用不到，兜底未实现（见 `docs/architecture.md` 阶段 6 的边界）。
+
+---
+
+## 7. 脚本怎么滚都抓不到首页的 homefeed？
+
+### 出了什么问题
+
+`Page.reload` 之后连发 20 次 `window.scrollBy(0, 2200)`，CDP 里一条 `/api/sns/web/v1/homefeed` 都没有，`window.scrollY` 恒为 0。
+
+### 当时的情况
+
+小红书首页已改成服务端直出首屏（`__INITIAL_STATE__.feed.feeds` 里已有 35 条），滚动容器不是 `window`；`document.documentElement.scrollHeight` 只有 850px，按「`overflow-y` 是 auto/scroll 且可滚距离大于 600」扫全页也挑不出任何滚动容器。
+
+### 为什么会这样
+
+首屏数据来自 HTML，`homefeed` 只在「加载更多」时发，而加载更多由内层虚拟列表的滚动触发。`Runtime.evaluate` 里合成的 `scrollBy` / `WheelEvent` 是 `isTrusted: false` 的脚本事件，这类滚动实现不认，页面根本没动。
+
+### 试过哪些办法
+
+找滚动容器再设 `scrollTop`、往 `document.elementFromPoint` 上派发 `WheelEvent`、`window.scrollTo`——都没动。旧脚本（`Spyder/xhs` 那份）当年能用 `window.scrollBy`，是因为当时首页还是窗口滚动；页面改版了，不是脚本坏了。
+
+### 最后怎么解决
+
+走 CDP 的**可信输入**：`Page.bringToFront` 之后发 `Input.synthesizeScrollGesture {x: 宽/2, y: 高/2, yDistance: -1500, speed: 3000, gestureSourceType: "mouse"}`，一轮就触发了 `homefeed`；`Input.dispatchMouseEvent {type:"mouseWheel"}` 作退路。探针脚本放 `scripts/`（不入库），结论落在这条。
+
+---
+
+## 8. 点调用链的帧，提示「找不到脚本 / js 文件不存在」？
+
+### 出了什么问题
+
+调用链已经能显示 44 帧了，但点任意一帧，弹窗里只有一句「找不到脚本 ext:<tabId>:2199」。
+
+### 当时的情况
+
+扩展桥的接法是 `chrome.debugger.attach` → `Debugger.enable` → 再 `POST /bridge/attach` 让宿主建虚拟会话。`Debugger.enable` 会把当时**已解析**的脚本一次性以 `Debugger.scriptParsed` 推出来，而那条推送发生在宿主还没有 `CdpClient` 的时候，`bridgeEvent()` 里 `if (!this.client) return` 直接丢了。
+
+### 为什么会这样
+
+源码读取被写成了「必须先有脚本索引条目」：`sourceOf()` 先 `scripts.getMeta(key)`，拿不到就抛错；`_sourceOf(meta)` 也依赖 meta 里的 `scriptId` + `sessionId`。但 `Debugger.getScriptSource` 只认 `scriptId`，而调用链的每一帧本来就带着 `scriptId`（`scriptKey` 就是 `<sessionId>:<scriptId>`）——索引只是缓存和 URL 的来源，不该是前置条件。
+
+### 试过哪些办法
+
+想过在 attach 之后再补一次 `Debugger.enable` 重放事件，但那是扩展侧的时序问题，补了也只在扩展路径成立；受控浏览器路径、DSH 重启后的重连都各有各的时序。另一个方向是把 `scriptParsed` 缓存起来等 client 就绪再灌进去，改动面更大且只修一条路径。第三版先做成「点一帧、没缓存就 `getScriptSource` 一次」——能用，但被指出方向不对：抓包工具不该在**查看时**才去调试通道要源码，否则断开、重启、脚本卸载之后都看不了，几 MB 的包还会每次翻页重读。
+
+### 最后怎么解决
+
+把源码变成**抓取时落盘**：`Debugger.scriptParsed` 只给元数据（scriptId/URL/行列范围），JS 正文浏览器从不主动推；所以在 `Network.requestWillBeSent` 收到带调用栈的条目时，`_queueSourcePersist()` 把栈里涉及的每个 `scriptId` 各取一次 `Debugger.getScriptSource`（读渲染进程里 V8 已保留的脚本对象，**不是重新下载**——不产生新 HTTP 请求、不打 CDN），写到 `<dataDir>/scripts/` 并在 `index.json` 记 URL/字符数/时间；单脚本 4MB、总量 256MB，超限写进 `reasons` 而不是悄悄丢。`sourceOf()` 之后只读磁盘，`Debugger.getScriptSource` 全仓只剩 `_readSourceText()` 一处调用；`webcap_script get/search` 与 `withSource` 片段同样读落盘那份，「清空 CDP」连磁盘一起清。压缩过的 bundle 整份只有一行，按行取窗口等于把 MB 级内容丢给面板，所以查看器按目标行长度切模式——超过 `MINIFIED_LINE_CHARS` 用 `columnWindow` 按列切，再用 `format.js` 展开成带缩进的多行并标出调用点（等价于 F12 的 `{}`，只作用于这一段；面板不提供「整份源码」），否则 `lineWindow` 给行上下文。落点：`lib/cdp/index.js`、`lib/cdp/scripts.js`、`lib/cdp/format.js`、`lib/cdp/sourceStore.js`、`lib/routes.js`、`client/client.js`（ADR-0022）。
+
+> 后续踩坑见下一条：落盘刚上线时大脚本一直报「CDP 命令超时」，根因在扩展桥的请求体上限。
+
+---
+
+## 9. 落盘大脚本时报「CDP 命令超时：Debugger.getScriptSource」？
+
+### 出了什么问题
+
+源码落盘上线后，小红书的 `index.a9f61821.js`（1.6MB）和大包一律失败，落盘记录里写着「抓取时没读到这个脚本：CDP 命令超时：Debugger.getScriptSource」；同一条调用链里的小脚本（几十 KB）却能存下来。
+
+更糟的是优先级倒挂——落盘成功的恰好是不需要的那些：
+
+```none
+落成功  396KB  as/v2/fp/c4a1….js          风控指纹脚本，跟业务接口无关
+落成功  361KB  async/9760.adcdb880.js     签名/风控 chunk
+落成功  288KB  （url 为空）                内联脚本
+落成功  212KB  library-polyfill.26cdc0cc.js
+落失败  ≥1.0MB vendor-dynamic.6e584070.js  ★ 接口定义层
+落失败  ≥1.6MB index.a9f61821.js           ★ 业务代码
+```
+
+### 当时的情况
+
+```none
+body=  800,042 B  status=200  {"ok":true}
+body=1,200,042 B  status=0    连接被断开
+body=3,000,042 B  status=0    连接被断开
+```
+
+宿主侧 `readBody()` 对所有 JSON 接口都按 **1MB** 掐断，而 `Debugger.getScriptSource` 的回包就是整份脚本，经 `/bridge/result` 原样 POST 回来。扩展那边 `postResult()` 拿到失败后**什么都没做**（`callHost` 把异常吞成 `{ok:false}`，返回值没人看），于是宿主侧 `CdpClient.send()` 一直等不到那个 id 的回包，15 秒后抛「CDP 命令超时」。
+
+### 为什么会这样
+
+三处默认值各自都合理，叠在一起就成死局：面板接口的 1MB 上限（防滥用）、CDP 命令 15 秒超时（防卡死）、扩展回包失败静默（当时认为 fetch 失败已在 `callHost` 里兜住了）。真正的问题是**没有人把「大回包」当成一条独立的传输路径来对待**：它既不是面板请求，也不该按普通命令的时限。
+
+### 试过哪些办法
+
+先量了一遍上限（上面的三条请求），确认不是浏览器、不是 `chrome.debugger` 大小限制；再看扩展日志——`sendCommand` 早就回来了，卡的是回传。也想过让扩展直接写文件，但 MV3 service worker 没有这个能力；想过按行/按字符分段取源码，CDP 没有分段接口。
+
+### 最后怎么解决
+
+按「大回包」单独定参数：`readBody(req, {limit})` 默认 1MB，`/bridge/result` 用 `MAX_BRIDGE_RESULT_BYTES = 12MB`（4MB 脚本 + JSON 转义留够余量）；超限改成**回 413 再断开**，不再直接 `req.destroy()`，让扩展能读到明确的失败；扩展 `postResult()` 失败时先原样重试一次，再退化发一条只有 `error` 的小回包，宿主立刻按真实原因失败而不是等超时；`getScriptSource` 走 `send(..., {timeoutMs: 60000})`，其余命令仍是 15 秒。同时把「为谁落盘」收紧成业务接口（`sourceFilter.js`：XHR/Fetch + 非埋点/APM/风控探针，内联脚本跳过），不再给 `as/v2/fp`、内联与埋点请求各存一份。回归用例：`test/routes.test.mjs` 里往 `/bridge/result` 打 5MB 回包必须 200；`test/cdp.test.mjs` 里业务接口判定有正反两组样例。落点：`lib/routes.js`、`lib/cdp/client.js`、`lib/cdp/index.js`、`lib/cdp/sourceFilter.js`、`extension/background.js`。
 
