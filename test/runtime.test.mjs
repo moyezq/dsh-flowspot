@@ -1,8 +1,7 @@
 /**
- * Runtime configuration: the two knobs a user is expected to edit — the listen
- * port and the data directory — plus the defaults everything else relies on.
- * No proxy is started and no certificate is generated here.
- * Run with: node test/runtime.test.mjs
+ * 运行配置：用户真正会去改的两个旋钮——监听端口和数据目录——以及其它一切所依赖的默认值。
+ * 这里不启动代理，也不生成证书。
+ * 运行：node test/runtime.test.mjs
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -14,7 +13,7 @@ import { DEFAULTS, adoptDataDir, adoptPendingCopy, dataDirSource, expandDataDir,
 
 const HOME = path.join(os.tmpdir(), 'dshwc-home')
 
-/** Run a case with DSH_HOME pinned, restoring the real value afterwards. */
+/** 把 DSH_HOME 钉住跑一个用例，跑完恢复原值（免得污染同进程里其它的用例）。 */
 function withHome(run) {
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = HOME
@@ -26,22 +25,25 @@ function withHome(run) {
   }
 }
 
+// 默认值就是文档里写的那几个数，改它等于悄悄改变面板行为，所以逐项钉死。
 test('defaults match the documented values', () => {
   const cfg = normalizeConfig({})
   assert.equal(cfg.port, 8899)
   assert.equal(cfg.dataDir, '')
   assert.equal(cfg.maxFlows, 1000)
   assert.equal(cfg.maxBodyBytes, 262144)
-  assert.equal(cfg.redact, true)
+  assert.equal(cfg.redact, false)
   assert.equal(cfg.persist, true)
   assert.equal(cfg.upstreamRejectUnauthorized, true)
   assert.equal(cfg.upstreamTimeoutMs, 30000)
   assert.equal(cfg.upstreamKeepAlive, false)
   assert.equal(cfg.setSystemProxyOnStart, true)
+  assert.equal(cfg.cdpBrowserPath, '')
   assert.equal(DEFAULTS.port, 8899)
 })
 
-test('explicit values win, and booleans only turn off on false', () => {
+// 显式配置必须逐项生效，不能被默认值悄悄盖掉。
+test('explicit values win, and redaction is opt-in', () => {
   const cfg = normalizeConfig({
     port: 9000,
     dataDir: 'E:\\CaptureData',
@@ -53,6 +55,7 @@ test('explicit values win, and booleans only turn off on false', () => {
     upstreamTimeoutMs: 1000,
     upstreamKeepAlive: true,
     setSystemProxyOnStart: false,
+    cdpBrowserPath: 'C:\\Tools\\chrome.exe',
   })
   assert.equal(cfg.port, 9000)
   assert.equal(cfg.dataDir, 'E:\\CaptureData')
@@ -64,13 +67,18 @@ test('explicit values win, and booleans only turn off on false', () => {
   assert.equal(cfg.upstreamTimeoutMs, 1000)
   assert.equal(cfg.upstreamKeepAlive, true)
   assert.equal(cfg.setSystemProxyOnStart, false)
+  assert.equal(cfg.cdpBrowserPath, 'C:\\Tools\\chrome.exe')
 
-  // "truthy but not false" keeps the feature on, so a string from YAML does
-  // not silently disable capture.
-  assert.equal(normalizeConfig({ redact: 'yes' }).redact, true)
+  // 打码默认关，只有显式传 true 才打开；其它值（包括手滑写成的字符串）
+  // 都不能悄悄把抓到的头打码。
+  assert.equal(normalizeConfig({ redact: 'yes' }).redact, false)
+  assert.equal(normalizeConfig({ redact: true }).redact, true)
+  // 其它布尔项保持「真值即可、只认 false 为关」的语义，YAML 里写个字符串
+  // 也不会把抓包悄悄关掉。
   assert.equal(normalizeConfig({ setSystemProxyOnStart: 1 }).setSystemProxyOnStart, true)
 })
 
+// 非法端口退回默认；但 0 是合法值——它的意思是让系统随机分配一个空闲端口。
 test('an invalid port falls back to the default; 0 means ephemeral', () => {
   assert.equal(normalizeConfig({ port: -1 }).port, 8899)
   assert.equal(normalizeConfig({ port: 'abc' }).port, 8899)
@@ -79,6 +87,7 @@ test('an invalid port falls back to the default; 0 means ephemeral', () => {
   assert.equal(normalizeConfig({ port: '8899' }).port, 8899)
 })
 
+// 非正数按字段各自退回默认，而不是整体重置配置——一个字段写错不该拖累其它字段。
 test('a non-positive number falls back per field, not globally', () => {
   const cfg = normalizeConfig({ maxFlows: 0, maxBodyBytes: -5, upstreamTimeoutMs: 0 })
   assert.equal(cfg.maxFlows, 1000)
@@ -86,6 +95,7 @@ test('a non-positive number falls back per field, not globally', () => {
   assert.equal(cfg.upstreamTimeoutMs, 30000)
 })
 
+// 空串、空格、undefined、null 都算「没配」，落到 DSH home 下的默认数据目录。
 test('an empty dataDir resolves to the default under DSH home', () => {
   withHome(() => {
     assert.equal(resolveDataDir(''), path.join(HOME, 'dsh-flowspot'))
@@ -95,6 +105,7 @@ test('an empty dataDir resolves to the default under DSH home', () => {
   })
 })
 
+// 绝对路径原样使用，不做任何拼接，也不做多余归一化。
 test('an absolute dataDir is used as given', () => {
   withHome(() => {
     const absolute = path.join(HOME, 'elsewhere', 'capture')
@@ -102,6 +113,7 @@ test('an absolute dataDir is used as given', () => {
   })
 })
 
+// 相对路径相对 DSH home，不是进程 cwd——否则从不同目录启动会写到两个地方。
 test('a relative dataDir resolves against DSH home, not the process cwd', () => {
   withHome(() => {
     assert.equal(resolveDataDir('cap-data'), path.join(HOME, 'cap-data'))
@@ -109,12 +121,14 @@ test('a relative dataDir resolves against DSH home, not the process cwd', () => 
   })
 })
 
+// ~ 开头展开到用户主目录，方便手写配置。
 test('a leading tilde resolves against the user home', () => {
   withHome(() => {
     assert.equal(resolveDataDir(`~${path.sep}capture`), path.join(os.homedir(), 'capture'))
   })
 })
 
+// 优先级是「面板选择 > 配置 dataDir > 默认」；清掉面板选择后要能回落到配置。
 test('the panel choice beats the config, and clearing it falls back', () => {
   withHome(() => {
     writeLocation('E:\\Picked\\cap')
@@ -132,6 +146,7 @@ test('the panel choice beats the config, and clearing it falls back', () => {
   })
 })
 
+// adoptDataDir 只登记选择，真正的 CA 复制推迟到下次启动：这样用户改主意时不留垃圾。
 test('adoptDataDir only records the choice; the CA is handed over at the next start', () => {
   withHome(() => {
     const current = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-cur-'))
@@ -147,18 +162,17 @@ test('adoptDataDir only records the choice; the CA is handed over at the next st
       assert.equal(result.foreignCa, false)
       assert.equal(result.restartRequired, true)
       assert.equal(result.dir, target)
-      // Nothing touched the disk: changing one's mind leaves no directory and
-      // no private-key copy behind.
+      // 这一步不碰磁盘：用户改主意时，既不会多出一个目录，也不会留下私钥副本。
       assert.equal(fs.existsSync(target), false)
       assert.equal(readLocation(), target)
       assert.equal(readPointer().copyFrom, current)
 
-      // The next start creates the directory and carries the CA over.
+      // 下次启动才真正建目录、把 CA 搬过去。
       const adopted = adoptPendingCopy(target)
       assert.equal(adopted.copied, true)
       assert.equal(adopted.from, current)
       assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'stub:ca.crt')
-      // The handover is one-shot.
+      // 交接只做一次，做完就把 copyFrom 清掉。
       assert.equal(readPointer().copyFrom, null)
       assert.equal(adoptPendingCopy(target).copied, false)
 
@@ -172,6 +186,7 @@ test('adoptDataDir only records the choice; the CA is handed over at the next st
   })
 })
 
+// 目标目录里已有 CA（用户之前用过）时不能覆盖，否则等于把别人的信任根换掉。
 test('adoptDataDir leaves an existing foreign CA alone', () => {
   withHome(() => {
     const current = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-cur-'))
@@ -184,7 +199,7 @@ test('adoptDataDir leaves an existing foreign CA alone', () => {
       assert.equal(result.copyOnStart, false)
       assert.equal(result.foreignCa, true)
       assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'foreign')
-      // A foreign CA is nobody to hand over, and the next start leaves it alone.
+      // 目标目录里已经有一张别人的 CA：没有东西可交接，下次启动也不能覆盖它。
       assert.equal(adoptPendingCopy(target).copied, false)
       assert.equal(fs.readFileSync(path.join(target, 'ca.crt'), 'utf8'), 'foreign')
     } finally {
@@ -195,6 +210,7 @@ test('adoptDataDir leaves an existing foreign CA alone', () => {
   })
 })
 
+// 目标是个文件不是目录时必须报错，而且不能把这个选择记下来。
 test('adoptDataDir rejects a path that is a file', () => {
   withHome(() => {
     const current = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-cur-'))
@@ -210,6 +226,7 @@ test('adoptDataDir rejects a path that is a file', () => {
   })
 })
 
+// 选中的就是当前目录等于没改：不写记录、也不要求重启。
 test('the same directory is a no-op, not a restart request', () => {
   withHome(() => {
     const current = fs.mkdtempSync(path.join(os.tmpdir(), 'dshwc-cur-'))
@@ -224,6 +241,7 @@ test('the same directory is a no-op, not a restart request', () => {
   })
 })
 
+// 对外暴露的展开规则，就是 adoptDataDir 内部用的那一套，不能有两份实现。
 test('expandDataDir exposes the raw expansion rules used by adoptDataDir', () => {
   withHome(() => {
     assert.equal(expandDataDir(''), path.join(HOME, 'dsh-flowspot'))

@@ -1,14 +1,12 @@
 /**
- * dsh-flowspot host entry.
+ * dsh-flowspot 宿主侧入口。
  *
- * Composes once per process: the MITM proxy, the certificate authority, the
- * Windows system-proxy controller and the flow store all live in one runtime,
- * so two sessions (or a panel plus a tool call) share the same capture buffer
- * and cannot fight over the listening port.
+ * 每个进程只组装一次：MITM 代理、证书颁发机构、Windows 系统代理控制器与 flow
+ * 存储都放在同一个 runtime 里，所以两个会话（或者面板加一次工具调用）共用同一份
+ * 抓包缓冲，也不会互相抢监听端口。
  *
- * The runtime is created lazily on first use: a profile that never touches the
- * plugin pays nothing, and a missing Windows tool only fails the call that needs
- * it instead of the whole plugin load.
+ * runtime 是懒建的：从没碰过本插件的 profile 不付任何代价；Windows 工具缺失时
+ * 也只让真正用到它的那次调用失败，而不是整个插件加载失败。
  */
 
 import { mountRoutes } from './lib/routes.js'
@@ -30,11 +28,19 @@ function makeLogger(ctx) {
   }
 }
 
+/**
+ * 插件入口，做三件事：接线日志、注册 HTTP 路由、注册 agent 工具，最后挂上
+ * 卸载时的收尾 effect。
+ * @param {object} ctx 宿主上下文
+ * @param {object} [config] 插件配置，含义见 lib/runtime.js 的 DEFAULTS
+ */
 export function apply(ctx, config) {
   const log = makeLogger(ctx)
   let runtime = null
   let runtimeError = null
 
+  // 懒建 runtime：建好就复用；建失败也把错误记住，后面每次调用直接抛同一个错，
+  // 不会反复重试初始化（尤其 Windows 工具缺失时）。
   const getRuntime = () => {
     if (runtime) return runtime
     if (runtimeError) throw runtimeError
@@ -49,6 +55,8 @@ export function apply(ctx, config) {
     }
   }
 
+  // ctx.inject 的回调可能在依赖晚到时就再触发一次，所以资源一律登记进 effect，
+  // 由 effect 的清理函数负责撤掉：重复挂载不会多留一份路由或工具。
   ctx.inject(['webServer'], (hostCtx) => {
     hostCtx.effect(() => {
       const rt = getRuntime()
@@ -65,13 +73,13 @@ export function apply(ctx, config) {
     toolCtx.effect(() => {
       const rt = getRuntime()
       const dispose = registerTools(toolCtx, rt)
-      log.info('[dsh-flowspot] 已注册 9 个 webcap_* 工具')
+      log.info('[dsh-flowspot] 已注册 14 个 webcap_* 工具')
       return dispose
     }, 'dsh-flowspot: agent tools')
   })
 
-  // Teardown must restore the system proxy: leaving it pointing at a dead port
-  // would break the machine's networking after the plugin unloads.
+  // 卸载必须先停代理、把系统代理恢复回去：留它指着一个已经没人监听的端口，插件
+  // 卸载后整台机器就上不了网了。runtime 从没建过的话就什么都不碰。
   ctx.effect(() => async () => {
     if (!runtime) return
     try {
