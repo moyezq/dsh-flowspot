@@ -44,6 +44,10 @@ _Avoid_: 调试端口、调试开关、远程调试
 随包的 MV3 扩展（`extension/`）：内容脚本注入 DSH 面板页，background 用 `chrome.debugger` 接管当前标签页；事件与命令经 `/dsh-flowspot/bridge/*` 与宿主往返。一次接管一个标签页，保留日常登录态。
 _Avoid_: 调试插件、浏览器桥
 
+**扩展连接页 / 宿主锁**：
+扩展连接页是 `/dsh-flowspot/bridge/hello` 返回的那一页：在浏览器里打开一次，它就把宿主真实的 `http://127.0.0.1:<端口>` 交给扩展（`externally_connectable` + 固定扩展 ID）。桌面端界面在 `dsh-app://` 里，内容脚本没有落脚处，这是唯一的自动交接路径。交接后扩展有一个 10 分钟的**宿主锁**（`hostPinnedUntil`），锁定期内忽略别的宿主页面发来的 `hello`，免得同时开着 web 版面板时地址被顶回去。
+_Avoid_: 桥接页、握手页、绑定
+
 **受控浏览器**：
 插件用独立 profile 启动的 Chrome/Edge，已被扩展桥取代，不再从面板提供入口；代码保留供手动 attach/调试。
 _Avoid_: 调试浏览器、测试浏览器
