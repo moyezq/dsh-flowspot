@@ -10,11 +10,17 @@ node_modules/
 *.pfx
 *.jsonl
 sysproxy.backup.json
+*.ndjson
+logs/
 dsh-flowspot.location.json
 
 # local data directories if a user points dataDir inside the repo
 flows/
 capture-data/
+
+# 本机 CDP 探针脚本：直连已开调试端口的浏览器、抓的是本机登录态，只在本地用，
+# 不进仓（脚本会把抓包写到系统临时目录，不在仓内留文件）
+scripts/
 
 # editor / OS noise
 .DS_Store

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Flowspot — system-wide HTTPS capture",
-    "description": "In-plugin MITM proxy with Windows system-proxy and CA automation; captured requests are stored as flows the agent can list, search and export as curl."
+    "description": "In-plugin MITM proxy with Windows system-proxy and CA automation; flows are readable by the agent and convertible to six languages, and a controlled browser adds CDP call chains, key parameters and sources."
   }
 }

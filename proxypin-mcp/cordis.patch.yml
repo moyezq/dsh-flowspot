@@ -1,16 +1,16 @@
-# ProxyPin MCP bridge: a configuration-only bundle (no Host or Client entry
-# file). It inserts the already-installed MCP client row, which then exposes
-# ProxyPin's tools to the model as mcp__proxypin__<tool>.
+# ProxyPin MCP 桥：一个只有配置、没有 Host / Client 入口文件的 bundle。
+# 它插入的是已安装好的 MCP 客户端行，把 ProxyPin 的工具以
+# mcp__proxypin__<tool> 的形式暴露给模型。
 #
-# Before this can connect: ProxyPin Desktop must be running with its MCP
-# service enabled (default http://127.0.0.1:9127/mcp). If port 9127 was already
-# taken, ProxyPin picks a random port — read the real URL from its settings
-# panel and change `url` below.
+# 想连上，得先让 ProxyPin Desktop 跑起来并开启它的 MCP 服务
+# （默认 http://127.0.0.1:9127/mcp）。如果 9127 端口已被占用，ProxyPin 会
+# 随机换一个端口——去它的设置面板读真实 URL，再改下面的 `url`。
 #
-# failOnStartupError: true follows the host template: a broken row is reported
-# at boot instead of silently disappearing. Set it to false if ProxyPin is not
-# always running and you can live with the tools being absent until the next
-# DSH restart.
+# 配置都落在这一行的 `config` 下，插件升级后依然保留（升级不动 profile 里的这一行）。
+#
+# failOnStartupError: true 跟宿主模板保持一致：这行配置坏了就在启动时报错，
+# 而不是静默消失。如果 ProxyPin 不是常驻运行、并且你能接受「下次重启 DSH 前
+# 工具暂缺」，把它改成 false。
 - insert:
     - id: proxypin-mcp
       name: '@deepseek-ai/dsh-mcp-client'

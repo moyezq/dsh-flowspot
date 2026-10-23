@@ -1,9 +1,10 @@
-# dsh-flowspot bundle layer: applied when the package is installed as a
-# profile bundle (package.json declares dsh.bundle.patch).
+# dsh-flowspot 的 bundle 层：当这个包以 profile bundle 形式安装时生效
+# （package.json 里声明了 dsh.bundle.patch）。
 #
-# The plugin is appended to the composed profile; every setting lives under the
-# row's `config` and is read by apply(ctx, config) with its own defaults, so
-# editing that config here survives plugin upgrades.
+# 下面这一行把插件追加到组装好的 profile 里；所有设置都写在这一行的 `config` 下，
+# 由 apply(ctx, config) 连同它自己的默认值一起读取。所以在这里改 config，
+# 插件升级后依然保留（升级只替换包本身，不动 profile 里的这一行）。
+# 这里目前只插行、没写 config：全部走默认值。
 - insert:
     - id: dsh-flowspot
       name: dsh-flowspot

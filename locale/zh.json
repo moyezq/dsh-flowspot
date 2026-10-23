@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Flowspot / 系统级 HTTPS 抓包",
-    "description": "插件内 MITM 代理 + Windows 系统代理与 CA 自动配置；抓到的请求以 flow 形式给 agent 查询、检索、导出 curl。"
+    "description": "插件内 MITM 代理 + Windows 系统代理与 CA 自动配置；抓到的请求以 flow 形式给 agent 查询、检索、导出 curl，并可转成 6 种语言的脚本；受控浏览器上还能通过 CDP 通道读调用链、关键参数与源码。"
   }
 }
