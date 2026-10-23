@@ -25,6 +25,7 @@ dsh-flowspot/
 │   ├── certstore.js    certutil 装/卸/查 Windows 信任根
 │   ├── sysproxy.js/.ps1 写注册表 + InternetSetOption 广播
 │   ├── sysbin.js     系统命令解析（System32 绝对路径兜底，桌面端 PATH 裁剪时用）
+│   ├── instanceLock.js 数据目录实例锁（web 与桌面端共用一份目录时，抓包串行化）
 │   ├── tools.js        14 个 webcap_* 工具（agent 侧的唯一事实源）
 │   ├── routes.js       30 条 /dsh-flowspot/*（面板侧，内部调 tool.execute）
 │   ├── logs.js         事件日志（只记非请求事件）+ 读取/打开目录/在资源管理器选中文件
@@ -33,7 +34,7 @@ dsh-flowspot/
 ├── client/client.js    面板侧（刷新页面即生效）：4 个 slot 注册 + 三块布局 + 两模式 + 设置弹窗 + 代码页 + 调用链 + 源码查看器
 ├── locale/             插件管理器里的标题与描述
 ├── scripts/            本机探针脚本（真实 CDP 抓包/对照），**不进仓**（见 .gitignore）
-├── test/               11 个文件 / 127 条契约测试（当 API 文档看）
+├── test/               12 个文件 / 131 条契约测试（当 API 文档看）
 ├── docs/               adr(为什么) / architecture(模块与不做) / pipelines(怎么做) / engineering(踩坑) / todo(方向)
 └── proxypin-mcp/       独立的配置型 bundle，给手机 ProxyPin 用，不随主插件加载
 ```
@@ -165,7 +166,7 @@ flow ──requestSpecOf()──> RequestSpec ──render(lang)──> code
 - **看文件头**：每个文件顶部的注释写的是契约（这个模块负责什么、不负责什么），比函数名信息量大；
 - **看 JSDoc**：`@param` / `@returns` 就是类型，VS Code 里能悬停、能跳转；想再强一点，可以加一个 `jsconfig.json`（`checkJs: true`）让编辑器做检查，代码一行不用改（ADR-0006 里就是这么规划的）；
 - **看 import**：ESM 的 import 就是依赖图，`lib/` 内部没有环，`client/` 不 import `lib/`（只走 HTTP 路由）；
-- **看测试**：127 条契约测试按文件分就是 11 个能力域。
+- **看测试**：131 条契约测试按文件分就是 12 个能力域。
 
 ## 规划（这份项目现在的阶段）
 

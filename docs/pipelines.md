@@ -240,6 +240,8 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 - `adoptDataDir()`：只**校验 + 记 pointer**，不建目录、不复制。目标已存在则须是目录且可写；不存在则校验最近一层已存在的父目录。指针里同时写 `copyFrom`——只在新目录没有 `ca.crt`、而当前目录有时才写；目标已有别家 CA 则 `foreignCa: true` 且不交。返回 `copyOnStart` 与 `restartRequired: true`。抓包运行中 `changeDataDir()` / `resetDataDir()` 直接拒绝。
 - `adoptPendingCopy(dir)`：启动时、加载 CA 之前跑一次，建目录并把 `ca.crt` / `ca.key.pem` / `leaf.key.pem` / `leaf.pub.der` 复制过去（目标已有 CA 或来源没有就跳过），随后清掉指针里的 `copyFrom`——交一次就结束。所以「选了又反悔」既不留空目录，也不留 CA 私钥副本。
 - `status().paths.pending` 表示「已经选了、但本进程还没切过去」的目录，面板据此显示「重启后生效」。
+- **实例锁**：`<数据目录>/instance.lock`，`start()` 一开始就 `acquire({port})`——同目录下另一个活实例持有时抛错（文案带 pid 与端口），失败或 `stop()`/`dispose()` 时 `release()`。持有者 pid 已死视为陈旧锁直接接管。`clearCdp`（会删 `scripts/`）、`changeDataDir`、`resetDataDir` 先 `blockedByOther()` 检查，另一个活实例在抓包就拒绝。`status().instance` 把 `{pid, heldByMe, holder, blocked}` 报给面板，面板据此禁用「开始抓包」并显示只读提示。
+- CDP 指针读回时会校验：`external` 为假且 `pid` 已死 → 当没有指针（web 与桌面端共用 `$DSH_HOME`，否则会读到对方留下的、早已关闭的受控浏览器）。
 - 目录里每样东西在什么操作下产生（改这块前要知道）：
   - `ca.crt` / `ca.key.pem` / `leaf.key.pem` / `leaf.pub.der`：**插件加载时** `createRuntime()` 就生成（`index.js` 的两个 `ctx.effect` 加载时即调 `getRuntime()`，不是点「开始抓包」才建），已存在则复用。
   - `flows/flows-<时间戳>.jsonl`：**一次抓包会话一个**。`start()` 只开新会话（`beginSession()` 关掉上一份），文件由本次抓包第一条完成的 flow 创建，`stop()` 关闭——所以只加载插件、或开了抓包却没有流量，都不留空文件。`persist: false` 时整个 `flows/` 都不建。
@@ -287,6 +289,7 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 - `test/routes.test.mjs`（32）：30 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`code`/`code-prefs`、CDP 六条路由（含 `cdp/code` 转脚本与 `cdp/reveal` 打开位置）、扩展桥的连接页与 `bridge.base`、5MB 脚本回包不被掐断、日志一条、桥接五条与扩展两条、`clear` 清 `recentErrors`、跨站 POST 被拒。
 - `test/runtime.test.mjs`（14）：`normalizeConfig`（含 `cdpBrowserPath`）、数据目录优先级与 `expandDataDir`、`adoptDataDir` 的复制与拒绝。
 - `test/proxy.test.mjs`（3）：`parseHead` 跨块解析、`_noteError` 聚合与上限。
+- `test/lock.test.mjs`（4）：空闲目录可加锁与释放、另一个**活**进程持锁时拒绝并报出持有者、pid 已死的陈旧锁被接管、释放不删别人的锁。
 - `test/sysbin.test.mjs`（2）：系统命令优先解析成 `%SystemRoot%\System32` 下的绝对路径（带不带 `.exe` 都认、支持自定义 SystemRoot），文件不在 / 非 Windows / 不在白名单时退回原样，空命令名直接报错。
 - 全部零依赖；单个文件直接 `node test/<file>.mjs`（`node --test test/` 会为每个文件起子进程，在受限沙箱里可能 `spawn EPERM`）。真实 TLS 用例依赖本机 Node ≥ 22 的 `crypto`；CDP 用例不启动浏览器，真实 Chrome 的行为要人工验收。
 

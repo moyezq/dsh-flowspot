@@ -308,6 +308,8 @@ window.__ModuleLoader__.load({
       // （桌面端界面在 dsh-app:// 里，内容脚本没有落脚处），必须由面板把地址交出去。
       const bridgeBase = (status && status.bridge && status.bridge.base) || ''
       const bridgeNeedsHandoff = Boolean(bridgeBase) && typeof location !== 'undefined' && location.origin !== bridgeBase
+      // 实例锁：另一个 DSH 实例在抓包时（web 版 + 桌面端共用数据目录），这边只做只读查看。
+      const otherInstance = (status && status.instance && status.instance.blocked && status.instance.holder) || null
       // 宿主跑在 node 子进程（桌面端）时 process.versions.electron 是空的，只能当弱信号。
       const isDesktop = Boolean((status && status.platform && status.platform.electron) || bridgeNeedsHandoff)
       /** 扩展连不上时补一句桌面端该怎么做（web 端没这问题，保持原话）。 */
@@ -1412,6 +1414,11 @@ window.__ModuleLoader__.load({
               ? h('div', null,
                 h('div', { className: 'dshwc-note' },
                   '把 Windows 系统代理指向本机 MITM 代理，自动签发每个域名的证书；适合先全局找接口。'),
+                otherInstance
+                  ? h('div', { className: 'dshwc-note dshwc-warn' },
+                    `另一个 DSH 实例正在抓包（pid ${otherInstance.pid}${otherInstance.port ? `，端口 ${otherInstance.port}` : ''}）：`
+                    + '两个实例共用同一份数据目录，这边先只能看，停掉那个再开始抓包。')
+                  : null,
                 h('div', { className: 'dshwc-grid' },
                   h(Cell, { label: '代理', value: running ? `运行中 :${port}` : '未运行' }),
                   h(Cell, { label: 'CA', value: caInstalled ? '已信任' : '未安装' }),
@@ -1420,7 +1427,10 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dshwc-row' },
                   h('button', {
                     className: 'dshwc-btn dshwc-btn-primary',
-                    disabled: busy,
+                    disabled: busy || (!running && Boolean(otherInstance)),
+                    title: otherInstance && !running
+                      ? `另一个 DSH 实例（pid ${otherInstance.pid}${otherInstance.port ? `，端口 ${otherInstance.port}` : ''}）正在抓包`
+                      : '',
                     onClick: toggleServe,
                   }, running ? '停止抓包' : '开始抓包'),
                   h('button', { className: 'dshwc-btn', disabled: busy, onClick: clearAll }, '清空')))
@@ -1923,6 +1933,7 @@ window.__ModuleLoader__.load({
 .dshwc-iconbtn { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; padding:0; border:1px solid var(--dsw-alias-border-l2); border-radius:6px; background:transparent; color:var(--dsw-alias-label-tertiary); cursor:pointer; }
 .dshwc-iconbtn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }
 .dshwc-note { color:var(--dsw-alias-label-tertiary); font-size:11px; line-height:1.6; }
+.dshwc-warn { color:var(--dsw-alias-label-warning, #d99a2b); }
 .dshwc-grid { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px; }
 .dshwc-cell { background:var(--dsw-alias-bg-layer-1); border-radius:6px; padding:6px 8px; }
 .dshwc-cell-label { color:var(--dsw-alias-label-tertiary); font-size:11px; }
