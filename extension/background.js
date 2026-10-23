@@ -289,6 +289,22 @@ function startPolling() {
   pollLoop()
 }
 
+/**
+ * 记住宿主地址。
+ *
+ * 桌面端的界面在 `dsh-app://` 里，内容脚本跑不了，扩展只能靠用户点面板里那一次
+ * 「在 Chrome 中打开」把地址带进来；写进 `storage.local` 之后，SW 重启、浏览器重启
+ * 都还能接着连，不用每次重来。
+ */
+function rememberHost(base) {
+  hostBase = base
+  try {
+    chrome.storage.local.set({ hostBase: base })
+  } catch {
+    /* 老 Chrome 或存储被禁用：内存里这份还能用 */
+  }
+}
+
 function armAlarm() {
   // MV3 service worker 会休眠；每 30 秒拉起来一次，最长等一轮就能接命令。
   chrome.alarms.create('flowspot-poll', { periodInMinutes: 0.5 })
@@ -388,9 +404,21 @@ chrome.debugger.onDetach.addListener(async (source) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.kind === 'hello') {
     const origin = String(message.origin || '')
-    if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) hostBase = origin
+    if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) rememberHost(origin)
     startPolling()
-    sendResponse({ ok: true, status: status(), version: chrome.runtime.getManifest().version })
+    sendResponse({ ok: true, status: status(), version: chrome.runtime.getManifest().version, hostBase })
+    return true
+  }
+  if (message && message.kind === 'set-host') {
+    // 没有内容脚本的场合（DSH Desktop 的界面在 dsh-app:// 里）用它手动指定宿主。
+    const origin = String(message.base || '')
+    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+      sendResponse({ ok: false, error: '地址要形如 http://127.0.0.1:<端口>' })
+      return true
+    }
+    rememberHost(origin)
+    startPolling()
+    sendResponse({ ok: true, hostBase })
     return true
   }
   if (message && message.kind === 'bridge-command') {
@@ -405,6 +433,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // SW 每次被唤醒都重新开始轮询；ready 里恢复 attached，避免命令拿到空 tabId。
 ready.then(async () => {
+  // 先恢复上次记住的宿主地址：桌面端没有内容脚本，这里不读会把地址打回默认端口。
+  try {
+    const saved = await chrome.storage.local.get(['hostBase'])
+    const savedBase = String((saved && saved.hostBase) || '')
+    if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(savedBase)) hostBase = savedBase
+  } catch {
+    /* 读不到就用默认值 */
+  }
   // SW 或 DSH 重启后，调试器可能还附着；把会话重新告诉宿主，别等用户再点一次。
   if (attached) {
     await callHost('/dsh-flowspot/bridge/attach', {

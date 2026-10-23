@@ -304,6 +304,16 @@ window.__ModuleLoader__.load({
     function Panel(props) {
       const docked = Boolean(props && props.docked)
       const [status, setStatus] = useState(null)
+      // 桌面端（Electron）的界面在 dsh-app:// 里：浏览器扩展拿不到这个 origin，
+      // 内容脚本也就不会替它上报宿主地址，所以要由面板把真实的 http 地址交过去。
+      // 以宿主上报的 status.platform.electron 为准，UA 只作渲染前的兜底。
+      const isDesktop = Boolean(status && status.platform && status.platform.electron)
+      const bridgeBase = (status && status.bridge && status.bridge.base) || ''
+      /** 扩展连不上时补一句桌面端该怎么做（web 端没这问题，保持原话）。 */
+      const bridgeFailText = useCallback((text) => {
+        const base = text || '扩展没有响应：确认已加载并处于启用状态'
+        return isDesktop ? `${base}。桌面端先点「在 Chrome 中打开」，把宿主地址交给扩展一次` : base
+      }, [isDesktop])
       const [flows, setFlows] = useState([])
       /** 两个互斥模式：系统抓包 / CDP 抓包；数据各自保留，切换只暂停另一边。 */
       const [mode, setMode] = useState(() => {
@@ -716,6 +726,24 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
+       * 让宿主在浏览器里打开「扩展连接页」：扩展借此记住宿主真实的 http 地址。
+       * 桌面端（dsh-app://）没有内容脚本可跑，这是唯一能自动交接地址的入口。
+       */
+      const openBridgeHello = useCallback(async () => {
+        const base = bridgeBase
+        const result = await post('/dsh-flowspot/bridge/open-hello', { base })
+        if (!mounted.current) return
+        if (!result || result.ok === false) {
+          setMessage({
+            kind: 'error',
+            text: (result && result.error) || `没打开浏览器；手动在 Chrome 里打开 ${base}/dsh-flowspot/bridge/hello`,
+          })
+          return
+        }
+        setMessage({ kind: 'ok', text: `已在浏览器打开连接页；扩展会记住 ${base}，那页可以关掉` })
+      }, [bridgeBase])
+
+      /**
        * 代码语言按钮来自宿主侧的偏好文件，而不是这个 bundle 里的常量，这样整页和
        * 右侧栏显示的顺序一致。
        */
@@ -844,7 +872,7 @@ window.__ModuleLoader__.load({
           const result = await post('/dsh-flowspot/bridge/command', { action, tabId })
           if (!mounted.current) return
           if (!result.ok) {
-            setMessage({ kind: 'error', text: result.error || '扩展没有响应：确认已加载并处于启用状态' })
+            setMessage({ kind: 'error', text: bridgeFailText(result.error) })
           } else {
             setCdpArmed(action !== 'detach')
             if (action !== 'detach') setMode('cdp')
@@ -868,7 +896,7 @@ window.__ModuleLoader__.load({
         const result = await post('/dsh-flowspot/bridge/command', { action: 'tabs' })
         if (!mounted.current) return
         if (!result.ok) {
-          setPicker({ open: true, loading: false, tabs: [], error: result.error || '扩展没有响应：确认已加载并处于启用状态' })
+          setPicker({ open: true, loading: false, tabs: [], error: bridgeFailText(result.error) })
           return
         }
         const tabs = result.result && Array.isArray(result.result.tabs) ? result.result.tabs : []
@@ -919,7 +947,7 @@ window.__ModuleLoader__.load({
           const result = await post('/dsh-flowspot/bridge/command', { action: 'attach-last' })
           if (!mounted.current) return
           if (!result.ok) {
-            setMessage({ kind: 'error', text: result.error || '扩展没有响应：确认已加载并处于启用状态' })
+            setMessage({ kind: 'error', text: bridgeFailText(result.error) })
             // 当前页没接上也不挡着选别的页面：继续列标签页。
             await openPicker()
             return
@@ -1406,6 +1434,20 @@ window.__ModuleLoader__.load({
                 bridgeTab
                   ? h('div', { className: 'dshwc-note' }, `当前标签页：${bridgeTab.title || bridgeTab.url || bridgeTab.tabId}`)
                   : null,
+                isDesktop && bridgeBase
+                  ? h('div', { className: 'dshwc-row dshwc-gap' },
+                    h('span', { className: 'dshwc-note' }, `扩展连接地址：${bridgeBase}`),
+                    h('button', {
+                      className: 'dshwc-chip', type: 'button', title: '复制这个地址',
+                      onClick: () => copyText(bridgeBase, '扩展连接地址'),
+                    }, '复制'),
+                    h('button', {
+                      className: 'dshwc-btn dshwc-btn-small', type: 'button', title: '在 Chrome 里打开一次连接页；扩展会记住这个地址',
+                      onClick: openBridgeHello,
+                    }, '在 Chrome 中打开'))
+                  : (bridgeBase && !bridgeTab
+                    ? h('div', { className: 'dshwc-note dshwc-gap' }, `扩展连接地址：${bridgeBase}（一般不用管；扩展没响应时可在 Chrome 里打开 ${bridgeBase}/dsh-flowspot/bridge/hello）`)
+                    : null),
                 cdp && cdp.sources && cdp.sources.scripts
                   ? h('div', { className: 'dshwc-note dshwc-gap' },
                     `源码已落盘 ${cdp.sources.scripts} 个 / ${(Number(cdp.sources.chars || 0) / 1048576).toFixed(1)}MB`

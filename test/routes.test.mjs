@@ -20,6 +20,8 @@ const ROUTES = [
   '/dsh-flowspot/bridge/command',
   '/dsh-flowspot/bridge/detach',
   '/dsh-flowspot/bridge/events',
+  '/dsh-flowspot/bridge/hello',
+  '/dsh-flowspot/bridge/open-hello',
   '/dsh-flowspot/bridge/poll',
   '/dsh-flowspot/bridge/result',
   '/dsh-flowspot/ca',
@@ -50,6 +52,8 @@ function fakeHost() {
   const routes = new Map()
   const ctx = {
     webServer: {
+      host: '127.0.0.1',
+      port: 8899,
       register(route) {
         if (routes.has(route.path)) throw new Error(`duplicate route ${route.path}`)
         routes.set(route.path, route)
@@ -78,6 +82,10 @@ function fakeRuntime() {
     openLogsDir: () => {
       calls.push('log-open')
       return { ok: true, dir: 'C:\\fake\\dsh-flowspot\\logs' }
+    },
+    openBridgeHello: (base) => {
+      calls.push(`hello-open:${base || ''}`)
+      return { ok: true, url: `${base || ''}/dsh-flowspot/bridge/hello` }
     },
     revealSources: (key) => {
       calls.push(`reveal:${key || ''}`)
@@ -272,8 +280,8 @@ async function call(routes, path, { method = 'GET', query = '', body, headers } 
   return { status: res.statusCode, headers: res.headers, json, text: res.text }
 }
 
-// 二十六条路由、路径精确匹配、dispose 后一条不剩：旧版本残留的路由不该继续响应。
-test('mounts the twenty-eight panel routes as exact paths and removes them on dispose', () => {
+// 三十条路由、路径精确匹配、dispose 后一条不剩：旧版本残留的路由不该继续响应。
+test('mounts the thirty panel routes as exact paths and removes them on dispose', () => {
   const { ctx, routes } = fakeHost()
   const { rt } = fakeRuntime()
   const dispose = mountRoutes(ctx, rt)
@@ -307,6 +315,31 @@ test('status answers JSON with proxy, CA, system-proxy and flow state', async ()
   assert.equal(json.paths.dir, 'C:\\fake\\dsh-flowspot')
 })
 
+// 桌面端的界面在 dsh-app:// 里，浏览器扩展拿不到那个 origin：宿主必须把真实的
+// http 地址交出去，否则扩展会一直对着默认端口轮询，面板看到的就是「扩展没有响应」。
+test('the bridge hands the host http base to the extension via status and a connect page', async () => {
+  const { ctx, routes } = fakeHost()
+  const { rt, calls } = fakeRuntime()
+  mountRoutes(ctx, rt)
+
+  const status = await call(routes, '/dsh-flowspot/status')
+  assert.equal(status.json.bridge.base, 'http://127.0.0.1:8899')
+
+  const hello = await call(routes, '/dsh-flowspot/bridge/hello')
+  assert.equal(hello.status, 200)
+  assert.match(hello.headers['content-type'], /text\/html/)
+  assert.ok(hello.text.includes('http://127.0.0.1:8899'))
+  assert.ok(hello.text.includes('/dsh-flowspot/status'))
+
+  const opened = await call(routes, '/dsh-flowspot/bridge/open-hello', { method: 'POST', body: {} })
+  assert.equal(opened.json.ok, true)
+  assert.ok(calls.includes('hello-open:http://127.0.0.1:8899'))
+
+  // 连接页只服务 GET；POST 走 405，免得它被当成控制面接口。
+  const wrong = await call(routes, '/dsh-flowspot/bridge/hello', { method: 'POST' })
+  assert.equal(wrong.status, 405)
+})
+
 // 面板（走路由）和工具读的是同一个 store：两边数字对不上就说明契约破了。
 test('status and flows read the same store, so panel and tools cannot disagree', async () => {
   const { ctx, routes } = fakeHost()
@@ -335,6 +368,7 @@ test('mutating routes refuse GET with 405', async () => {
     '/dsh-flowspot/bridge/attach',
     '/dsh-flowspot/bridge/command',
     '/dsh-flowspot/bridge/events',
+    '/dsh-flowspot/bridge/open-hello',
     '/dsh-flowspot/bridge/result',
     '/dsh-flowspot/bridge/detach',
     '/dsh-flowspot/cdp/reveal',

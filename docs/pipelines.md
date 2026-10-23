@@ -129,6 +129,8 @@
 | `/dsh-flowspot/bridge/events` | POST | `{events:[{method,params}]}`（一次最多 200 条）；请求体上限 4MB（带 POST 体的站点一批可到 MB 级） |
 | `/dsh-flowspot/bridge/result` | POST | `{id,result,error}` 回填 chrome.debugger 命令；请求体上限 12MB（整份脚本源码走这条），超限回 413 而不是掐连接 |
 | `/dsh-flowspot/bridge/poll` | GET | `wait`（毫秒，≤30s）→ 一条待发命令或 null |
+| `/dsh-flowspot/bridge/hello` | GET | 返回一页 HTML（不是 JSON，也故意不查同源）：浏览器打开它，内容脚本就认领宿主地址。桌面端界面在 `dsh-app://` 里、跑不了内容脚本，靠这一页把 `http://127.0.0.1:<port>` 交给扩展 |
+| `/dsh-flowspot/bridge/open-hello` | POST | `{base?}` → 宿主在 Chrome 里打开上面那一页（面板按钮走这条；跨站拒绝） |
 | `/dsh-flowspot/bridge/detach` | POST | — |
 | `/dsh-flowspot/extension/zip` | GET | 随包 `extension/` 的 zip |
 | `/dsh-flowspot/extension/open` | POST | `explorer.exe` 打开扩展目录（跨站拒绝） |
@@ -184,6 +186,7 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 6. 命令：宿主把命令放队列；内容脚本/background 长轮询 `GET /bridge/poll` 取走，`chrome.debugger.sendCommand` 后 `POST /bridge/result` 回填。源码、跨脚本搜索、`Network.enable` 都走这条路。
 7. 断开：点扩展图标/面板「断开」/agent `detach` → `chrome.debugger.detach` → `POST /bridge/detach`，宿主只清伪会话与通道状态（`_resetBridgeState({preserveData:true})`）；**网络索引与已读源码都留着**，面板的 CDP 列表继续显示断开前抓到的请求，并标一句「只有点清空才会清掉」。
 8. 日志：`bridge-attach` / `bridge-detach` 进事件日志（只记 tabId/title）。
+9. 地址交接（桌面端必需）：扩展默认对着 `127.0.0.1:3080` 轮询，只有内容脚本能把它改到真正的宿主端口；而 **DSH Desktop 的界面在 `dsh-app://` 里**，内容脚本根本没有落脚处，于是扩展一直对着旧端口，面板报「扩展没有响应」。解法是让浏览器打开一次 `/bridge/hello`：这一页由内容脚本认领（它先 `GET /dsh-flowspot/status` 确认是宿主），把 `location.origin` 报给 background，background 写进 `chrome.storage.local` 并开始轮询——之后 SW 重启、浏览器重启都记得。面板在桌面端会显示「扩展连接地址」，并给一个「在 Chrome 中打开」按钮走 `/bridge/open-hello`；同一个扩展同时只能连一个宿主（web 或桌面端，后连的覆盖前者）。
 
 一次「启动 → 连接 → 拿调用链」（受控浏览器遗留路径）：
 
@@ -281,7 +284,7 @@ curl.exe "http://127.0.0.1:3080/dsh-flowspot/flows?type=xhr&limit=5"
 - `test/der.test.mjs`（7）：长度编码边界、`integer` 正负、`oid`、`time`、`bitString` 等原语。
 - `test/x509.test.mjs`（6）：CA 生成/加载、叶子链、SAN/IP、真 `tls` 握手、未受信 CA 被拒（新 Node 报 `HANDSHAKE_FAILURE` 也算通过）。
 - `test/flows.test.mjs`（21）：环形淘汰、过滤、类型分类、`describeBody` 解压/截断/base64、打码开关、JSONL、curl/HAR、`listGroups` 与 `normalizeUrl`。
-- `test/routes.test.mjs`（31）：28 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`code`/`code-prefs`、CDP 六条路由（含 `cdp/code` 转脚本与 `cdp/reveal` 打开位置）、5MB 脚本回包不被掐断、日志一条、桥接五条与扩展两条、`clear` 清 `recentErrors`、跨站 POST 被拒。
+- `test/routes.test.mjs`（32）：30 条路由的请求/响应契约、坏 JSON、`group/normalize` 透传、`errorHint`、`code`/`code-prefs`、CDP 六条路由（含 `cdp/code` 转脚本与 `cdp/reveal` 打开位置）、扩展桥的连接页与 `bridge.base`、5MB 脚本回包不被掐断、日志一条、桥接五条与扩展两条、`clear` 清 `recentErrors`、跨站 POST 被拒。
 - `test/runtime.test.mjs`（14）：`normalizeConfig`（含 `cdpBrowserPath`）、数据目录优先级与 `expandDataDir`、`adoptDataDir` 的复制与拒绝。
 - `test/proxy.test.mjs`（3）：`parseHead` 跨块解析、`_noteError` 聚合与上限。
 - `test/sysbin.test.mjs`（2）：系统命令优先解析成 `%SystemRoot%\System32` 下的绝对路径（带不带 `.exe` 都认、支持自定义 SystemRoot），文件不在 / 非 Windows / 不在白名单时退回原样，空命令名直接报错。

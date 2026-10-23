@@ -267,4 +267,22 @@ body=3,000,042 B  status=0    连接被断开
 ### 最后怎么解决
 
 按「大回包」单独定参数：`readBody(req, {limit})` 默认 1MB，`/bridge/result` 用 `MAX_BRIDGE_RESULT_BYTES = 12MB`（4MB 脚本 + JSON 转义留够余量）；超限改成**回 413 再断开**，不再直接 `req.destroy()`，让扩展能读到明确的失败；扩展 `postResult()` 失败时先原样重试一次，再退化发一条只有 `error` 的小回包，宿主立刻按真实原因失败而不是等超时；`getScriptSource` 走 `send(..., {timeoutMs: 60000})`，其余命令仍是 15 秒。同时把「为谁落盘」收紧成业务接口（`sourceFilter.js`：XHR/Fetch + 非埋点/APM/风控探针，内联脚本跳过），不再给 `as/v2/fp`、内联与埋点请求各存一份。回归用例：`test/routes.test.mjs` 里往 `/bridge/result` 打 5MB 回包必须 200；`test/cdp.test.mjs` 里业务接口判定有正反两组样例。落点：`lib/routes.js`、`lib/cdp/client.js`、`lib/cdp/index.js`、`lib/cdp/sourceFilter.js`、`extension/background.js`。
+## 10. 桌面端能用系统抓包，CDP 却报「扩展没有响应」
 
+**症状**：DSH Desktop（Electron）里，装插件、系统抓包都正常；点「连接浏览器」只回一句
+`扩展没有响应：确认扩展已加载，且 Chrome 没有把它停用`。同一个扩展在 web 版（`dsh plugin … web`）下一切正常。
+
+**怎么查**：先分清「扩展没跑」和「扩展连错了地方」——
+- 扩展装上后，background 的默认地址是 `http://127.0.0.1:3080`；
+- 桌面端宿主的真实端口是随机的（实测 `127.0.0.1:19387`），且能用 `Invoke-WebRequest /dsh-flowspot/status` 匿名访问；
+- `hostBase` 只有一个来源：内容脚本 `hello` 消息里的 `location.origin`；而内容脚本的注入条件是页面 URL 匹配 `http://127.0.0.1/*`。
+
+**根因**：桌面端渲染进程的参数里有 `--standard-schemes=dsh-app --secure-schemes=dsh-app`，界面跑在 `dsh-app://` 下。浏览器的内容脚本不会在 Electron 里运行，也不会匹配自定义协议——所以 `hello` 永远不来，扩展一直对着 3080（往往是另一个 web 实例）轮询，桌面端这边自然一个轮询都收不到。
+
+**修法**（0.6.8）：把地址交接做成一条显式路径，而不是依赖「碰巧有个 DSH 页面在浏览器里」——
+1. `status.bridge.base` 由宿主 `webServer.host/port` 算出（面板在 `dsh-app://` 里拿不到真实 origin）；
+2. 新增 `GET /bridge/hello`：返回一页 HTML，被浏览器打开时内容脚本照常认领、把 origin 报给 background；
+3. 新增 `POST /bridge/open-hello`：宿主用 `findBrowser()` 在 Chrome 里打开那一页（面板按钮触发）；
+4. 扩展把地址写进 `chrome.storage.local`，SW 启动时先读回——否则 MV3 一休眠又退回 3080。
+
+**教训**：「扩展没响应」在跨宿主形态下先问「它连的是谁」，而不是「它是不是被停用了」。默认端口这种隐式约定，在桌面端（自定义协议、随机端口）一定失效。
