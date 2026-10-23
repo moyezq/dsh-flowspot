@@ -1,6 +1,10 @@
 # dependencies
 node_modules/
 
+# 本机凭据（如发 Release 用的 GitHub token），绝不进仓
+.env
+.env.*
+
 # captured data must never be committed: the CA private key and request bodies
 # are personal data (some of it sensitive)
 *.pem
