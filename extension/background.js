@@ -497,6 +497,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true
 })
 
+/**
+ * 网页（宿主的「连接页」）直接给扩展发消息指定宿主地址。
+ *
+ * manifest 里带了固定 `key`（ID 不再取决于加载路径）+ `externally_connectable`，
+ * 所以宿主那一页可以自己 `chrome.runtime.sendMessage(<id>, {kind:'set-host'})`。
+ * 这条路径不依赖内容脚本——桌面端（dsh-app://）里内容脚本没有落脚处，只能靠它。
+ *
+ * 只认 `sender.origin`：页面说自己是哪个端口就是哪个，不接受它替别人指定地址。
+ */
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  if (!message || message.kind !== 'set-host') {
+    sendResponse({ ok: false, error: 'unknown message' })
+    return true
+  }
+  const senderUrl = String((sender && (sender.origin || sender.url)) || '')
+  const match = /^(http:\/\/(?:127\.0\.0\.1|localhost):\d+)/.exec(senderUrl)
+  if (!match) {
+    sendResponse({ ok: false, error: '来源不是本机页面' })
+    return true
+  }
+  rememberHost(match[1])
+  startPolling()
+  sendResponse({ ok: true, hostBase, version: chrome.runtime.getManifest().version })
+  return true
+})
+
 // SW 每次被唤醒都重新开始轮询；ready 里恢复 attached，避免命令拿到空 tabId。
 ready.then(async () => {
   // 先恢复上次记住的宿主地址：桌面端没有内容脚本，这里不读会把地址打回默认端口。

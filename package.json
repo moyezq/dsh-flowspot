@@ -1,6 +1,6 @@
 {
   "name": "dsh-flowspot",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "private": true,
   "description": "Flowspot — Charles-style HTTPS capture for DeepSeek Harness (Windows): an in-plugin MITM proxy, system-proxy and CA automation, flow storage, and agent tools. Flowspot：面向 DeepSeek Harness 的 Charles 式抓包插件——插件内 MITM 代理 + Windows 系统代理/CA 自动配置 + 流量存储 + agent 工具。",
   "license": "MIT",

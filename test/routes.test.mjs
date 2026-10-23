@@ -330,6 +330,9 @@ test('the bridge hands the host http base to the extension via status and a conn
   assert.match(hello.headers['content-type'], /text\/html/)
   assert.ok(hello.text.includes('http://127.0.0.1:8899'))
   assert.ok(hello.text.includes('/dsh-flowspot/status'))
+  // 连接页自己给扩展发消息（externally_connectable + 固定 key），不依赖内容脚本。
+  assert.ok(hello.text.includes('chrome.runtime.sendMessage'))
+  assert.match(hello.text, /labahanibojjkgcacfdmeafjgdlidpcb/)
 
   const opened = await call(routes, '/dsh-flowspot/bridge/open-hello', { method: 'POST', body: {} })
   assert.equal(opened.json.ok, true)

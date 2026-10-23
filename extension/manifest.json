@@ -1,21 +1,42 @@
 {
   "manifest_version": 3,
   "name": "Flowspot Bridge",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "把当前标签页的 CDP 事件转给本机 dsh-flowspot（只连 127.0.0.1）。",
-  "permissions": ["debugger", "tabs", "storage", "alarms", "scripting"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
-  "background": { "service_worker": "background.js" },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "Flowspot：接管当前标签页" }
+  "action": {
+    "default_title": "Flowspot：接管当前标签页"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAydcNQY/vVwftPOONMV8wy/FWRiOnkNfQruwWTgSGiy6qBDVdAXMxLS7BvenKdU2Xm2YOERFma0JijY0bH0qnVt8RWQ8JjNAGB8DwF1N0AxhzeDgLIHHV+iNqY2Pl+QDqic5hqjLhXCrVCB5dwAdSkbm61M5CgbCBH+MalmFubjm6zvoJrF6jzxIRudQCp54dRhrFE78avtJ3M+4s6DRzUwAF11Tle3UF2ZuMSPnYX0sJZBEwHAntwy5iufQ2FIz5fxitglxnVQ6utawkS2oUre6O6TCzjXLFsoNIm8fjHTn/Cw0PTg3K/+wzEkyqg8ANDfjGsdhz8jg4i6a3NvYy1QIDAQAB",
+  "externally_connectable": {
+    "matches": [
+      "http://127.0.0.1/*",
+      "http://localhost/*"
+    ]
+  }
 }
-
-
-
-
