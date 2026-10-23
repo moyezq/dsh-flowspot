@@ -273,6 +273,16 @@ async function handleCommand(command) {
 let pollSeq = 0
 /** 连续失败次数：连着失败就顺手去标签页里找一遍宿主，别一直对着错端口。 */
 let pollFails = 0
+/**
+ * 显式交接（连接页 sendMessage / 点图标的发现）之后，这段时间内不接受内容脚本的
+ * `hello` 改地址。
+ *
+ * 不加这个锁会「抢来抢去」：用户 Chrome 里同时开着 web 版面板（比如 3080）时，
+ * 那个页面的内容脚本每 10 秒发一次 hello，把刚认下的桌面端地址顶掉，面板于是永远
+ * 连不上。锁 10 分钟，用户想切回去就在那边点一次连接页即可（显式交接会重置锁）。
+ */
+let hostPinnedUntil = 0
+const HOST_PIN_MS = 10 * 60 * 1000
 
 async function pollLoop() {
   if (polling) return
@@ -337,7 +347,7 @@ async function discoverHostFromTabs() {
         if (!response.ok) continue
         const body = await response.json()
         if (!body || body.ok !== true) continue
-        rememberHost(origin)
+        rememberHost(origin, { pin: true })
         return true
       } catch {
         /* 这个标签页不是宿主，试下一个 */
@@ -356,11 +366,16 @@ async function discoverHostFromTabs() {
  * 「在 Chrome 中打开」把地址带进来；写进 `storage.local` 之后，SW 重启、浏览器重启
  * 都还能接着连，不用每次重来。
  */
-function rememberHost(base) {
-  if (!base || base === hostBase) return
+function rememberHost(base, { pin = false } = {}) {
+  if (!base) return
+  if (pin) hostPinnedUntil = Date.now() + HOST_PIN_MS
+  if (base === hostBase) {
+    if (pin) restartPolling()
+    return
+  }
   hostBase = base
   try {
-    chrome.storage.local.set({ hostBase: base })
+    chrome.storage.local.set({ hostBase: base, hostPinnedUntil })
   } catch {
     /* 老 Chrome 或存储被禁用：内存里这份还能用 */
   }
@@ -378,6 +393,9 @@ async function ensureContentScripts() {
     const tabs = await chrome.tabs.query({ url: ['http://127.0.0.1/*', 'http://localhost/*'] })
     for (const tab of tabs) {
       if (tab.id == null) continue
+      // 只补当前宿主的页面：往别的宿主页面里注入内容脚本，它会开一个 hello 循环，
+      // 每 10 秒把 hostBase 顶回去（桌面端就是这么被抢走的）。
+      if (!String(tab.url || '').startsWith(hostBase)) continue
       try {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
       } catch {
@@ -470,8 +488,11 @@ chrome.debugger.onDetach.addListener(async (source) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.kind === 'hello') {
     const origin = String(message.origin || '')
-    if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) rememberHost(origin)
-    startPolling()
+    const valid = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
+    // 锁定期内忽略「别的宿主」的 hello：否则开着 web 面板时它每 10 秒把地址顶回去。
+    const pinned = Date.now() < hostPinnedUntil && origin !== hostBase
+    if (valid && !pinned) rememberHost(origin)
+    if (!valid || !pinned) startPolling()
     sendResponse({ ok: true, status: status(), version: chrome.runtime.getManifest().version, hostBase })
     return true
   }
@@ -482,7 +503,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: false, error: '地址要形如 http://127.0.0.1:<端口>' })
       return true
     }
-    rememberHost(origin)
+    rememberHost(origin, { pin: true })
     startPolling()
     sendResponse({ ok: true, hostBase })
     return true
@@ -517,7 +538,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     sendResponse({ ok: false, error: '来源不是本机页面' })
     return true
   }
-  rememberHost(match[1])
+  rememberHost(match[1], { pin: true })
   startPolling()
   sendResponse({ ok: true, hostBase, version: chrome.runtime.getManifest().version })
   return true
@@ -527,9 +548,11 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 ready.then(async () => {
   // 先恢复上次记住的宿主地址：桌面端没有内容脚本，这里不读会把地址打回默认端口。
   try {
-    const saved = await chrome.storage.local.get(['hostBase'])
+    const saved = await chrome.storage.local.get(['hostBase', 'hostPinnedUntil'])
     const savedBase = String((saved && saved.hostBase) || '')
     if (/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(savedBase)) hostBase = savedBase
+    const savedPin = Number((saved && saved.hostPinnedUntil) || 0)
+    if (Number.isFinite(savedPin) && savedPin > Date.now()) hostPinnedUntil = savedPin
   } catch {
     /* 读不到就用默认值 */
   }
