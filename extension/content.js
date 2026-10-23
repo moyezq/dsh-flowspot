@@ -9,6 +9,8 @@
 
 if (!window.__flowspotBridgeLoaded) {
   window.__flowspotBridgeLoaded = true
+  // 排查用：页面里能看出内容脚本到底有没有被注入（桌面端这一步最容易静默失败）。
+  try { document.documentElement.setAttribute('data-flowspot-bridge', 'loaded') } catch {}
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

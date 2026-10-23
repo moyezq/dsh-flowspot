@@ -26,7 +26,7 @@ Agent 可以：勾选已完成、在对应节补可能的后续方向。改已�
 ## 功能开发未实现
 
 - [ ] DSH Desktop 真机验收：应用内插件页安装、CA 安装 / 系统代理接管、CDP 接管与调用链各跑一遍。
-      扩展地址交接已修（`status.bridge.base` + `/bridge/hello` + 「在 Chrome 中打开」+ `storage.local` 记住），
+      扩展地址交接已修（`status.bridge.base` + `/bridge/hello` + 「在 Chrome 中打开」+ 标签页发现 + `storage.local` 记住），
       缺的是真机确认；同一扩展只能连一个宿主（web 或桌面端，后连的覆盖）
 - [ ] 代码语言第二批（PowerShell / HTTPie / Wget / PHP 等低成本项）；要往插件里打包重依赖的语言先讨论再定
 - [ ] 调用链展示仍可讨论：是否按业务函数名折叠；目前完整栈与业务帧可切换，点帧看源码已实现

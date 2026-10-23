@@ -304,16 +304,18 @@ window.__ModuleLoader__.load({
     function Panel(props) {
       const docked = Boolean(props && props.docked)
       const [status, setStatus] = useState(null)
-      // 桌面端（Electron）的界面在 dsh-app:// 里：浏览器扩展拿不到这个 origin，
-      // 内容脚本也就不会替它上报宿主地址，所以要由面板把真实的 http 地址交过去。
-      // 以宿主上报的 status.platform.electron 为准，UA 只作渲染前的兜底。
-      const isDesktop = Boolean(status && status.platform && status.platform.electron)
+      // 面板的 origin 和宿主的 http 源对不上时，浏览器里的扩展不可能自己找到这个宿主
+      // （桌面端界面在 dsh-app:// 里，内容脚本没有落脚处），必须由面板把地址交出去。
       const bridgeBase = (status && status.bridge && status.bridge.base) || ''
+      const bridgeNeedsHandoff = Boolean(bridgeBase) && typeof location !== 'undefined' && location.origin !== bridgeBase
+      // 宿主跑在 node 子进程（桌面端）时 process.versions.electron 是空的，只能当弱信号。
+      const isDesktop = Boolean((status && status.platform && status.platform.electron) || bridgeNeedsHandoff)
       /** 扩展连不上时补一句桌面端该怎么做（web 端没这问题，保持原话）。 */
       const bridgeFailText = useCallback((text) => {
         const base = text || '扩展没有响应：确认已加载并处于启用状态'
-        return isDesktop ? `${base}。桌面端先点「在 Chrome 中打开」，把宿主地址交给扩展一次` : base
-      }, [isDesktop])
+        if (!bridgeNeedsHandoff) return base
+        return `${base}。先点「在 Chrome 中打开」，再点一下 Chrome 工具栏上的 Flowspot 图标，让扩展认下这个地址`
+      }, [bridgeNeedsHandoff])
       const [flows, setFlows] = useState([])
       /** 两个互斥模式：系统抓包 / CDP 抓包；数据各自保留，切换只暂停另一边。 */
       const [mode, setMode] = useState(() => {
@@ -1435,16 +1437,19 @@ window.__ModuleLoader__.load({
                   ? h('div', { className: 'dshwc-note' }, `当前标签页：${bridgeTab.title || bridgeTab.url || bridgeTab.tabId}`)
                   : null,
                 isDesktop && bridgeBase
-                  ? h('div', { className: 'dshwc-row dshwc-gap' },
-                    h('span', { className: 'dshwc-note' }, `扩展连接地址：${bridgeBase}`),
-                    h('button', {
-                      className: 'dshwc-chip', type: 'button', title: '复制这个地址',
-                      onClick: () => copyText(bridgeBase, '扩展连接地址'),
-                    }, '复制'),
-                    h('button', {
-                      className: 'dshwc-btn dshwc-btn-small', type: 'button', title: '在 Chrome 里打开一次连接页；扩展会记住这个地址',
-                      onClick: openBridgeHello,
-                    }, '在 Chrome 中打开'))
+                  ? h('div', { className: 'dshwc-gap' },
+                    h('div', { className: 'dshwc-row' },
+                      h('span', { className: 'dshwc-note' }, `扩展连接地址：${bridgeBase}`),
+                      h('button', {
+                        className: 'dshwc-chip', type: 'button', title: '复制这个地址',
+                        onClick: () => copyText(bridgeBase, '扩展连接地址'),
+                      }, '复制'),
+                      h('button', {
+                        className: 'dshwc-btn dshwc-btn-small', type: 'button', title: '在 Chrome 里打开一次连接页',
+                        onClick: openBridgeHello,
+                      }, '在 Chrome 中打开')),
+                    h('div', { className: 'dshwc-note' },
+                      '打开后点一下 Chrome 工具栏上的 Flowspot 图标——扩展会认下这个地址（之后端口不变就不用再来一次）。'))
                   : (bridgeBase && !bridgeTab
                     ? h('div', { className: 'dshwc-note dshwc-gap' }, `扩展连接地址：${bridgeBase}（一般不用管；扩展没响应时可在 Chrome 里打开 ${bridgeBase}/dsh-flowspot/bridge/hello）`)
                     : null),

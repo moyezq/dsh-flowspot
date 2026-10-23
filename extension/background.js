@@ -269,17 +269,29 @@ async function handleCommand(command) {
   }
 }
 
+/** 每次换宿主都 +1：正在长轮询的那一轮醒来发现代次不对就退出，立刻改连新地址。 */
+let pollSeq = 0
+/** 连续失败次数：连着失败就顺手去标签页里找一遍宿主，别一直对着错端口。 */
+let pollFails = 0
+
 async function pollLoop() {
   if (polling) return
   polling = true
-  while (polling) {
+  const mine = ++pollSeq
+  while (polling && mine === pollSeq) {
     try {
       const response = await fetch(`${hostBase}/dsh-flowspot/bridge/poll?wait=20000`, {
         headers: { 'x-flowspot-bridge': '1' },
       })
+      if (!response.ok) throw new Error(`poll ${response.status}`)
+      pollFails = 0
       const body = await response.json()
       if (body && body.command) await handleCommand(body.command)
     } catch {
+      pollFails += 1
+      // 连不上就试一次「从已打开的标签页里认宿主」：桌面端没有内容脚本，这一条是
+      // 唯一不靠用户手打地址的自动路径。
+      if (pollFails >= 2) await discoverHostFromTabs()
       await sleep(2000)
     }
   }
@@ -287,6 +299,54 @@ async function pollLoop() {
 
 function startPolling() {
   pollLoop()
+}
+
+/** 换宿主时打断当前这一轮长轮询（它最多还要等 20 秒，不能干等）。 */
+function restartPolling() {
+  pollSeq += 1
+  polling = false
+  pollLoop()
+}
+
+/**
+ * 从已打开的标签页里认宿主。
+ *
+ * 桌面端的界面在 `dsh-app://` 里，内容脚本没有落脚处，`hello` 永远不会来——
+ * 但用户在 Chrome 里打开过「连接页」（或任何 127.0.0.1 的页面）时，那个标签页的
+ * origin 就是宿主地址。逐个探 `/dsh-flowspot/status`，谁应答就是谁。
+ * @returns {Promise<boolean>} 找到了没有
+ */
+async function discoverHostFromTabs() {
+  try {
+    const tabs = await chrome.tabs.query({})
+    const origins = []
+    for (const tab of tabs) {
+      const url = String((tab && tab.url) || '')
+      const match = /^http:\/\/(127\.0\.0\.1|localhost):(\d+)\//.exec(url)
+      if (!match) continue
+      const origin = `http://${match[1]}:${match[2]}`
+      if (!origins.includes(origin)) origins.push(origin)
+    }
+    for (const origin of origins) {
+      if (origin === hostBase) continue
+      try {
+        const response = await fetch(`${origin}/dsh-flowspot/status`, {
+          headers: { 'x-flowspot-bridge': '1' },
+          signal: AbortSignal.timeout(1500),
+        })
+        if (!response.ok) continue
+        const body = await response.json()
+        if (!body || body.ok !== true) continue
+        rememberHost(origin)
+        return true
+      } catch {
+        /* 这个标签页不是宿主，试下一个 */
+      }
+    }
+  } catch {
+    /* tabs 查不到（权限/窗口受限）就保持原样 */
+  }
+  return false
 }
 
 /**
@@ -297,12 +357,14 @@ function startPolling() {
  * 都还能接着连，不用每次重来。
  */
 function rememberHost(base) {
+  if (!base || base === hostBase) return
   hostBase = base
   try {
     chrome.storage.local.set({ hostBase: base })
   } catch {
     /* 老 Chrome 或存储被禁用：内存里这份还能用 */
   }
+  restartPolling()
 }
 
 function armAlarm() {
@@ -329,7 +391,7 @@ async function ensureContentScripts() {
 
 chrome.runtime.onInstalled.addListener(() => {
   armAlarm()
-  startPolling()
+  discoverHostFromTabs().finally(() => startPolling())
   ensureContentScripts()
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs[0]
@@ -339,7 +401,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   armAlarm()
-  startPolling()
+  discoverHostFromTabs().finally(() => startPolling())
   ensureContentScripts()
 })
 
@@ -352,9 +414,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.action.onClicked.addListener(async (tab) => {
   await ready
-  startPolling()
+  // 桌面端（dsh-app://）没有内容脚本，点图标是用户能给出的最直接信号：
+  // 先看当前标签页是不是宿主（用户刚从面板点开「连接页」时就是），再接管。
+  const adopted = await discoverHostFromTabs()
+  if (!adopted) startPolling()
   ensureContentScripts()
-  if (!tab || tab.id == null) return
+  // 刚认下新宿主时这一下只是「把地址交给扩展」，别把连接页当成要接管的页面。
+  if (adopted || !tab || tab.id == null) return
   try {
     if (attached && attached.tabId === tab.id) await detach()
     else await attach(tab.id)
