@@ -179,4 +179,12 @@ web 任一 client 入口 FAILED 会挡住整个 GUI。`sidebarRightTabs` / `side
 
 选 ③。规则：落盘目录 `<dataDir>/scripts`，单脚本上限 4MB、总量 256MB（超限不落盘并把原因记进索引，面板据此解释「为什么看不了」，而不是偷偷再拉）；**触发面只给业务接口**——`type` 是 `XHR`/`Fetch`、URL 是 http(s)、host/path 不在埋点/APM/风控探针噪声表里（`sourceFilter.js`），内联脚本与 `data:`/`blob:` 跳过；实测旧规则（任何带调用栈的请求）会先落 `as/v2/fp/*.js`（风控指纹 396KB）、内联脚本（288KB）和 polyfill，而真正要看的业务大包被排在后面。同一脚本只取一次、失败最多两次、串行执行避免和正常请求抢通道；预览与定位（含「整份源码」分页、调用链 `withSource` 的片段、`webcap_script get/search`）全部读本地；生命周期跟「清空 CDP」绑定。代价：每站首次几十 MB 磁盘里的一小部分（4~10MB）+ 每脚本一次往返；断开或换标签页不再丢源码。
 
+## ADR-0023 · 2026-10-23 · 桌面端复用同一套宿主与面板；扩展地址由连接页显式交接
 
+现象：DSH Desktop 上插件装得上、系统抓包正常，`CDP 抓包` 永远报「扩展没有响应」。查清三件事：① 桌面端 profile 的组合包就是 `dsh-base` + `dsh-web-app`，宿主仍是同一个 node 进程（`dsh-subprocess-local` 子进程，所以 `status.platform.electron` 为空）；② 桌面窗口的 origin 是 `dsh-app://`（渲染进程带 `--standard-schemes=dsh-app`），浏览器扩展的内容脚本不会在 Electron 里运行，也不匹配自定义协议；③ 扩展默认对着 `127.0.0.1:3080` 轮询，而桌面端端口是随机的（实测 `19387`），且该端口匿名就能访问 `/dsh-flowspot/*`。
+
+备选：① 让用户手填地址——可行但每换端口都要重来，且桌面端面板里粘地址很别扭；② 只靠内容脚本 `hello` 上报 origin——桌面端根本不注入，且同时开着 web 版面板时，那边每 10 秒一次的 hello 会把地址顶回去（真机上就是这么失败的）；③ 让扩展主动扫端口——16k 个端口不现实；④ 给 manifest 加固定 `key` 得到稳定 ID，让**网页**通过 `externally_connectable` 直接给扩展发消息。
+
+选 ④ 为主，② 与「点图标的标签页发现」留作兜底。规则：宿主把 `status.bridge.base`（`webServer.host/port` 算出）交给面板；面板按钮打开 `/dsh-flowspot/bridge/hello`，该页用固定扩展 ID（`labahanibojjkgcacfdmeafjgdlidpcb`，由 `key` 的 DER 前 16 字节哈希得出）调 `chrome.runtime.sendMessage`；background 的 `onMessageExternal` **只认 `sender.origin`**，写进 `storage.local` 并重建轮询。显式交接带 10 分钟 `hostPinnedUntil`，锁定期内忽略别的宿主的 `hello`；`ensureContentScripts()` 只往当前宿主的页面补脚本；换宿主用 `pollSeq` 代次立刻打断旧长轮询。
+
+后果：扩展 ID 从此固定，**升级时要重载一次扩展**（ID 变了说明加载的是旧副本）；同一扩展同一时间只连一个宿主，最后一次显式交接说了算；web 与桌面端共用同一个 `$DSH_HOME/dsh-flowspot`，同时开抓包会互相踩（待议，见 `docs/todo.md`）。不采用「桌面端另起一套数据目录/另一套客户端」：桌面端加载的就是同一个 web-app，为它分叉等于复制两套面板与路由。
