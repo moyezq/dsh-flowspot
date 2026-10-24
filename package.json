@@ -1,9 +1,17 @@
 {
   "name": "dsh-flowspot",
   "version": "0.6.12",
-  "private": true,
   "description": "Flowspot — Charles-style HTTPS capture for DeepSeek Harness (Windows): an in-plugin MITM proxy, system-proxy and CA automation, flow storage, and agent tools. Flowspot：面向 DeepSeek Harness 的 Charles 式抓包插件——插件内 MITM 代理 + Windows 系统代理/CA 自动配置 + 流量存储 + agent 工具。",
   "license": "MIT",
+  "author": "moyezq",
+  "homepage": "https://github.com/moyezq/dsh-flowspot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moyezq/dsh-flowspot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moyezq/dsh-flowspot/issues"
+  },
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -39,6 +47,9 @@
     "cordis.patch.yml",
     "CHANGELOG.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "flowspot",
     "deepseek",

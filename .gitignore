@@ -1,5 +1,6 @@
 # dependencies
 node_modules/
+*.tgz
 
 # 本机凭据（如发 Release 用的 GitHub token），绝不进仓
 .env
