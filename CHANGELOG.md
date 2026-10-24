@@ -3,7 +3,20 @@
 每个发布版一节，**最新在前**。一节只写「用的人能感知到的变化」：能做什么了、行为变了什么、升级要注意什么、已知限制。
 实现细节进 `docs/`（架构 → `docs/architecture.md`、流程 → `docs/pipelines.md`、踩坑 → `docs/engineering.md`、为什么这么定 → `docs/adr.md`）。
 
-版本号与 `package.json` 一致，tag 形如 `v0.6.12`；GitHub Release 的正文从对应的一节截取。
+版本号与 `package.json` 一致，tag 形如 `vX.Y.Z`；GitHub Release 的正文从对应的一节截取。
+
+---
+
+## v0.6.13 · 2026-10-24 · 上架 npm
+
+首个发布到 npm 的版本。功能与 v0.6.12 相同，另含发布用的元数据与文档：
+
+- `package.json` 去掉 `private`，补 `author` / `homepage` / `repository` / `bugs` / `publishConfig`，`files` 白名单带 `CHANGELOG.md`
+- 新增 `CHANGELOG.md`：每版一节，Release 正文从它截取
+- 安装方式多一行：`dsh plugin --profile web add dsh-flowspot`（`dsh` 把参数转给 profile 里的 pnpm，装完自动写进 `dsh.profile.bundles`）
+- 打包核对：47 个文件 / 165 KB（解包 507 KB），`docs/` 与 `test/` 不进包
+
+升级：重启 DSH 或桌面端即可；扩展仍是 0.2.9，不需要重装。
 
 ---
 
