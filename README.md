@@ -52,17 +52,23 @@
 
 插件（包名 `dsh-flowspot`）要装进 DSH 的 profile（下面以 `web` 为例），放在磁盘上不等于装好。
 
-**Web 界面**：左侧栏 **插件 → 添加插件**，填本仓的绝对路径，安装后点 **立即启用**。
+**命令行（已发布到 npm）**：
 
-**命令行**：
+```powershell
+dsh plugin --profile web add dsh-flowspot
+```
+
+装完重启 DSH。国内镜像还没同步到最新版时加 `--registry=https://registry.npmjs.org/`；刚发布的新版本 pnpm 会提示「最小发布年龄」，按提示把它排除一次即可。
+
+**Web 界面**：左侧栏 **插件 → 添加插件**，填包名 `dsh-flowspot`（或本仓绝对路径），安装后点 **立即启用**。
+
+**本机开发**：装本仓目录，得到 `link:` 依赖，改代码不用重装：
 
 ```powershell
 dsh plugin --profile web add "<本仓绝对路径>"
 ```
 
-装完重启 DSH。装的是 `link:` 依赖（profile 的 `node_modules/dsh-flowspot` 指回本仓），所以之后改代码不用重新安装：改面板（`client/client.js`）刷新页面即可，改宿主侧（`index.js`、`lib/`）重启 DSH 即生效。
-
-发布到 npm 之后同理，把绝对路径换成包名：`dsh plugin --profile web add dsh-flowspot`。
+`link:` 之后改面板（`client/client.js`）刷新页面即可，改宿主侧（`index.js`、`lib/`）重启 DSH 即生效。
 
 **DSH Desktop（桌面端）**：装法走桌面应用自己的**插件页**，不要用命令行——`dsh plugin --profile desktop` 被宿主明确禁止（`profile "desktop" is managed exclusively by the Electron application`）。运行能力与 web 一致：桌面端跑的就是同一套 `dsh-web-app`，宿主半区照常挂路由、面板半区照常加载，CA 与系统代理仍走当前用户级操作、不需要管理员。
 
