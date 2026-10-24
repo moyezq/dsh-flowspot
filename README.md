@@ -184,7 +184,8 @@ dsh-flowspot/
 ├── proxypin-mcp/        配置型 bundle：接 ProxyPin 的 MCP（给手机用）
 ├── locale/              插件管理器里的标题与描述
 ├── test/                契约测试（node --test test/）
+├── CHANGELOG.md         每个发布版一节（新增/修复/升级/已知限制）
 └── docs/                # 内部说明，日常使用不必读
 ```
 
-仓库：https://github.com/moyezq/dsh-flowspot ｜ 许可证：MIT（见 `LICENSE`）。
+仓库：https://github.com/moyezq/dsh-flowspot ｜ 变更记录：[CHANGELOG.md](./CHANGELOG.md) ｜ 许可证：MIT（见 `LICENSE`）。

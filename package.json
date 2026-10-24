@@ -36,7 +36,8 @@
     "client",
     "locale",
     "extension",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "flowspot",
