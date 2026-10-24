@@ -1,0 +1,71 @@
+name: CI
+
+# 每次 push 到 main、每个 PR 都跑一遍契约测试。
+# 这个仓零运行时依赖、没有 lockfile，所以 CI 里没有 `npm ci` 这一步——测试就是
+# `node test/<file>.test.mjs`，逐个文件跑（汇总是 `node --test test/`，但沙箱里可能
+# 因起子进程受限而失败，CI 里也用逐文件的方式，和本地命令保持一致）。
+#
+# runner 选 windows-latest：插件本体只支持 Windows，一批用例走的是 Windows 分支
+# （certutil / 注册表 / 路径），在 Linux 上会变成「跳过」而不是「通过」，那不算验证。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备 Node
+        uses: actions/setup-node@v7
+        with:
+          # package.json 声明 >=20；DSH 本体要 22，所以这里按 22 验
+          node-version: '22'
+
+      - name: 版本信息
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+
+      - name: 契约测试（逐文件）
+        shell: pwsh
+        run: |
+          $failed = @()
+          Get-ChildItem test/*.test.mjs | Sort-Object Name | ForEach-Object {
+            Write-Host "::group::$($_.Name)"
+            node $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "::error::失败的文件：$($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "全部通过"
+
+      - name: 扩展与打包自检
+        shell: pwsh
+        run: |
+          # 扩展目录必须能被 zip 打包（面板「下载扩展」走的就是这条）
+          node -e "import('./lib/zip.js').then(m => { const buf = m.zipDirectory('extension'); if (!buf || buf.length < 100) throw new Error('zip 为空'); console.log('zip ok', buf.length, 'bytes') })"
+          # npm 打包内容必须还是文件白名单里的那批，且不含 docs/test/.env/scripts
+          # 注意：npm 12 的 `--json` 输出是「按包名索引的对象」，不是数组，两种都要认
+          $json = & npm pack --dry-run --json 2>$null | ConvertFrom-Json
+          $entry = if ($json -is [array]) { $json[0] } else { $json.PSObject.Properties.Value | Select-Object -First 1 }
+          $files = $entry.files.path
+          $bad = $files | Where-Object { $_ -match '^(docs|test)/|^\.env|^scripts/' }
+          if ($bad) { Write-Host "::error::不该进包的文件：$($bad -join ', ')"; exit 1 }
+          Write-Host "打包 $($files.Count) 个文件，$([math]::Round($entry.size/1KB)) KB"

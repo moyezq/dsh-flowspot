@@ -1,0 +1,116 @@
+name: Publish to npm
+
+# 在 GitHub 上「Publish release」之后，把这一版发到 npm——不需要任何长期 token。
+#
+# 认证走 npm 的 Trusted Publishing（OIDC）：
+#   1. 下面 `permissions.id-token: write` 让 runner 能向 GitHub 领取一次性 OIDC 令牌；
+#   2. npmjs.com → 包 → Settings → Trusted Publishing 里登记「这个仓库的这个 workflow」；
+#   3. `npm publish` 用令牌换发布权限，发布后自动带 provenance 证明。
+#
+# 三处不能错（错一处 npm 只会回一个 404，不告诉你是哪一处）：
+#   - 本文件名必须是 release.yml（与 npm 侧登记的 workflow 文件名一致）；
+#   - package.json 的 repository.url 必须与仓库完全一致；
+#   - npm CLI 必须 ≥ 11.5.1，所以下面显式升级 npm。
+#
+# 触发方式只有 release published 与手动：不要同时用 tag push 触发，否则同一个版本
+# 会被发两次（第二次 E409）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只打包、不真正发布
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # 领取 OIDC 令牌，Trusted Publishing 的前提
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: 升级 npm（Trusted Publishing 要求 ≥ 11.5.1）
+        shell: pwsh
+        run: |
+          npm install -g npm@latest
+          $ver = (npm --version)
+          Write-Host "npm $ver"
+          $parts = $ver.Split('.')
+          if ([int]$parts[0] -lt 11 -or ([int]$parts[0] -eq 11 -and [int]$parts[1] -lt 5)) {
+            Write-Host "::error::npm $ver 太低，Trusted Publishing 需要 ≥ 11.5.1"
+            exit 1
+          }
+
+      - name: 版本与 tag 一致性
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ('${{ github.event_name }}' -eq 'release') {
+            $tag = '${{ github.event.release.tag_name }}'
+            if ($tag -ne "v$ver") {
+              Write-Host "::error::tag '$tag' 与 package.json 的 '$ver' 不一致（应为 v$ver）"
+              exit 1
+            }
+          }
+          Write-Host "package.json version = $ver"
+
+      - name: 契约测试（逐文件）
+        shell: pwsh
+        run: |
+          $failed = @()
+          Get-ChildItem test/*.test.mjs | Sort-Object Name | ForEach-Object {
+            Write-Host "::group::$($_.Name)"
+            node $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "::error::失败的文件：$($failed -join ', ')"
+            exit 1
+          }
+
+      - name: 确认这个版本还没被发过
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $existing = npm view "dsh-flowspot@$ver" version --registry https://registry.npmjs.org/ 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) {
+            Write-Host "::error::npm 上已经有 dsh-flowspot@$ver 了，不能重发（先升版本号）"
+            exit 1
+          }
+          Write-Host "dsh-flowspot@$ver 尚未发布，继续"
+
+      - name: 发布（OIDC，无 token）
+        if: ${{ inputs.dry_run != true }}
+        shell: pwsh
+        run: |
+          npm publish --provenance --access public --registry https://registry.npmjs.org/
+
+      - name: dry-run（只打包）
+        if: ${{ inputs.dry_run == true }}
+        shell: pwsh
+        run: |
+          npm publish --dry-run --provenance --access public --registry https://registry.npmjs.org/
+
+      - name: 发布结果
+        if: ${{ inputs.dry_run != true }}
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          npm view "dsh-flowspot@$ver" version dist.tarball --registry https://registry.npmjs.org/
