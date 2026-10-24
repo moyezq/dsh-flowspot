@@ -140,5 +140,23 @@ jobs:
         if: ${{ inputs.dry_run != true }}
         shell: pwsh
         run: |
+          # 发布已经成功，这一步只是核对。npm 的读侧有滞后（刚发的版本可能立刻查不到
+          # 或查不到 attestations），所以重试几次；仍查不到只告警，不让整个发布判失败
+          # ——发布本身的结果已经由上一步的退出码决定了。
           $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          npm view "dsh-flowspot@$ver" version dist.tarball --registry https://registry.npmjs.org/
+          $seen = $false
+          for ($i = 1; $i -le 6; $i++) {
+            $out = npm view "dsh-flowspot@$ver" version dist.tarball --registry https://registry.npmjs.org/ 2>$null
+            $LASTEXITCODE = 0
+            if ($out) { $seen = $true; $out | ForEach-Object { Write-Host $_ }; break }
+            Write-Host "第 $i 次：读侧还没同步，15 秒后重试"
+            Start-Sleep -Seconds 15
+          }
+          if (-not $seen) {
+            Write-Host "::warning::已发布，但 6 次查询都没看到 dsh-flowspot@$ver（npm 读侧滞后），稍后手动确认："
+            Write-Host "  npm view dsh-flowspot version --registry https://registry.npmjs.org/"
+          }
+          $attest = npm view "dsh-flowspot@$ver" dist.attestations --json --registry https://registry.npmjs.org/ 2>$null
+          $LASTEXITCODE = 0
+          if ($attest -match 'provenance') { Write-Host "provenance 存在" } else { Write-Host "::warning::还没查到 provenance（同样可能是滞后）" }
+          exit 0
