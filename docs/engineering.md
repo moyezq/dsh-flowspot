@@ -301,4 +301,12 @@ body=3,000,042 B  status=0    连接被断开
 四条修法缺一不可，按出错顺序排：地址要**给得到**（`status.bridge.base` + 连接页 + `externally_connectable`）→ 要**记得住**（`storage.local`，含 pin）→ 不能**被抢回去**（`hostPinnedUntil` 压过别的宿主的 `hello`）→ 命令要**送得到**（`pollSeq` 让换宿主立刻生效，不干等 20 秒）。
 
 **这次暴露的另一个限制**：web 与桌面端跑同一个插件时共用 `$DSH_HOME/dsh-flowspot`（CA、`scripts/` 索引、`sysproxy.backup.json`、flows 都是同一份）。两个宿主同时开抓包会互相踩，见 `docs/todo.md` 的待议项。
+## 11. GitHub Actions 里 `pwsh` 步骤明明打印了成功却报失败
 
+**症状**：`release.yml` 的「确认这个版本还没被发过」一步，日志里已经打出 `dsh-flowspot@0.6.14 尚未发布，继续`，紧接着却是 `Error: Process completed with exit code 1`，后面的 OIDC 发布根本没跑到。
+
+**根因**：这一步先用 `npm view` 探测版本是否存在——版本不存在时 npm 返回退出码 1。脚本用 `$LASTEXITCODE` 判断后继续往下走，打印了成功信息，**但没清掉 `$LASTEXITCODE`**。GitHub 的 `pwsh`/`powershell` 步骤会在脚本结尾检查这个变量，非零就判失败——于是「探测失败」被当成了「这一步失败」。
+
+**修法**：把探测结果先存进布尔变量，然后 `$LASTEXITCODE = 0`，并在成功路径末尾显式 `exit 0`。
+
+**教训**：在 Actions 里用 PowerShell，**任何一次预期内的非零退出码都要手动清零**；`exit 0` 比「靠最后一条命令的成功」可靠。同样的坑也存在于 `git diff --quiet`、`grep`（返回 1 表示没匹配）这类「用退出码表达结果」的命令。

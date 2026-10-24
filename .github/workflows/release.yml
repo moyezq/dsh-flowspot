@@ -90,11 +90,16 @@ jobs:
         run: |
           $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $existing = npm view "dsh-flowspot@$ver" version --registry https://registry.npmjs.org/ 2>$null
-          if ($LASTEXITCODE -eq 0 -and $existing) {
+          $already = ($LASTEXITCODE -eq 0) -and [bool]$existing
+          # 清掉探测留下的非零退出码：GitHub 的 pwsh 包装器会在脚本结束时检查
+          # $LASTEXITCODE，不清就会把「查不到 = 可以发」误判成这一步失败。
+          $LASTEXITCODE = 0
+          if ($already) {
             Write-Host "::error::npm 上已经有 dsh-flowspot@$ver 了，不能重发（先升版本号）"
             exit 1
           }
           Write-Host "dsh-flowspot@$ver 尚未发布，继续"
+          exit 0
 
       - name: 发布（OIDC，无 token）
         if: ${{ inputs.dry_run != true }}
