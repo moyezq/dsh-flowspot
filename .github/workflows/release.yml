@@ -101,6 +101,29 @@ jobs:
           Write-Host "dsh-flowspot@$ver 尚未发布，继续"
           exit 0
 
+      - name: OIDC 诊断
+        shell: pwsh
+        run: |
+          node -v
+          npm -v
+          "registry = " + (npm config get registry)
+          $authLines = npm config list -l 2>$null | Select-String -Pattern '_authToken|always-auth'
+          if ($authLines) { "⚠️ 存在 auth 配置："; $authLines | ForEach-Object { "  $($_.Line)" } } else { "没有残留的 _authToken 配置" }
+          $LASTEXITCODE = 0
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) {
+            Write-Host "::error::没有 ACTIONS_ID_TOKEN_REQUEST_URL —— id-token: write 没生效"
+            exit 1
+          }
+          "ACTIONS_ID_TOKEN_REQUEST_URL 存在"
+          try {
+            $resp = Invoke-RestMethod -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=npm:registry.npmjs.org" -Headers @{ Authorization = "bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)" } -TimeoutSec 20
+            "OIDC 令牌可领取：$($resp.value.Length) 字符"
+          } catch {
+            Write-Host "::error::领取 OIDC 令牌失败：$($_.Exception.Message)"
+            exit 1
+          }
+          exit 0
+
       - name: 发布（OIDC，无 token）
         if: ${{ inputs.dry_run != true }}
         shell: pwsh
