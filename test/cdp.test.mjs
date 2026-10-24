@@ -505,7 +505,7 @@ test('a CDP request becomes a flow-shaped input for the code generators', () => 
       type: 'XHR',
       request: {
         method: 'POST',
-        url: 'https://edith.xiaohongshu.com/api/sns/web/v1/homefeed?x=1',
+        url: 'https://api.example.com/api/sns/web/v1/homefeed?x=1',
         headers: { 'Content-Type': 'application/json;charset=UTF-8', Cookie: 'a=1', 'X-S': 'sig' },
         postData: '{"num":20}',
       },
@@ -513,7 +513,7 @@ test('a CDP request becomes a flow-shaped input for the code generators', () => 
   })
   const flow = channel.codeFlowOf(entry.id)
   assert.equal(flow.method, 'POST')
-  assert.equal(flow.host, 'edith.xiaohongshu.com')
+  assert.equal(flow.host, 'api.example.com')
   assert.equal(flow.path, '/api/sns/web/v1/homefeed?x=1')
   assert.equal(flow.port, 443)
   assert.match(flow.reqBody.mime, /json/)
@@ -675,19 +675,19 @@ test('capturing a request persists the scripts behind its call stack', async () 
 
 test('only business API requests trigger source persistence', () => {
   const yes = [
-    { resourceType: 'XHR', url: 'https://edith.xiaohongshu.com/api/sns/web/v1/homefeed' },
+    { resourceType: 'XHR', url: 'https://api.example.com/api/sns/web/v1/homefeed' },
     { resourceType: 'Fetch', url: 'https://api.example.com/v1/items?page=2' },
-    { resourceType: 'Fetch', url: 'https://www.xiaohongshu.com/graphql' },
+    { resourceType: 'Fetch', url: 'https://app.example.com/graphql' },
   ]
   const no = [
-    { resourceType: 'Document', url: 'https://www.xiaohongshu.com/explore' },
-    { resourceType: 'Script', url: 'https://fe-static.xhscdn.com/formula-static/js/index.a9f61821.js' },
-    { resourceType: 'Image', url: 'https://sns-img.xhscdn.com/a.jpg' },
+    { resourceType: 'Document', url: 'https://app.example.com/explore' },
+    { resourceType: 'Script', url: 'https://cdn.example.com/formula-static/js/index.a9f61821.js' },
+    { resourceType: 'Image', url: 'https://img.example.com/a.jpg' },
     // 埋点 / APM / 风控探针
-    { resourceType: 'XHR', url: 'https://t2.xiaohongshu.com/api/v2/collect' },
-    { resourceType: 'XHR', url: 'https://apm-fe.xiaohongshu.com/api/data' },
-    { resourceType: 'POST', url: 'https://as.xiaohongshu.com/api/sec/v1/scripting' },
-    { resourceType: 'XHR', url: 'https://edith.xiaohongshu.com/api/redcaptcha/v2/getconfig' },
+    { resourceType: 'XHR', url: 'https://t2.example.com/api/v2/collect' },
+    { resourceType: 'XHR', url: 'https://apm-fe.example.com/api/data' },
+    { resourceType: 'POST', url: 'https://as.example.com/api/sec/v1/scripting' },
+    { resourceType: 'XHR', url: 'https://api.example.com/api/redcaptcha/v2/getconfig' },
     // 不是 http(s)：内联脚本与 blob
     { resourceType: 'XHR', url: '' },
     { resourceType: 'XHR', url: 'data:application/json,{}' },

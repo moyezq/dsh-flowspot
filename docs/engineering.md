@@ -163,7 +163,7 @@ client bundle 是页面加载时从包目录取的，**宿主侧代码是进程�
 
 ### 当时的情况
 
-扩展桥接管小红书的首页标签页，CDP 列表里 `homefeed` 抓得到、头与 POST 体也对。用一条浏览器级 CDP 连接复抓同一条请求、把 `Network.requestWillBeSent` 的 `initiator` 整个落盘，才看清结构：`stack.callFrames` 只有 3 帧，其余 42 帧在 `stack.parent` 串起的 4~6 层里（合计 45 帧 / 7 段 / 22 个函数名）。
+扩展桥接管某内容站的首页标签页，CDP 列表里 `homefeed` 抓得到、头与 POST 体也对。用一条浏览器级 CDP 连接复抓同一条请求、把 `Network.requestWillBeSent` 的 `initiator` 整个落盘，才看清结构：`stack.callFrames` 只有 3 帧，其余 42 帧在 `stack.parent` 串起的 4~6 层里（合计 45 帧 / 7 段 / 22 个函数名）。
 
 ### 为什么会这样
 
@@ -187,7 +187,7 @@ client bundle 是页面加载时从包目录取的，**宿主侧代码是进程�
 
 ### 当时的情况
 
-小红书首页已改成服务端直出首屏（`__INITIAL_STATE__.feed.feeds` 里已有 35 条），滚动容器不是 `window`；`document.documentElement.scrollHeight` 只有 850px，按「`overflow-y` 是 auto/scroll 且可滚距离大于 600」扫全页也挑不出任何滚动容器。
+某内容站首页已改成服务端直出首屏（`__INITIAL_STATE__.feed.feeds` 里已有 35 条），滚动容器不是 `window`；`document.documentElement.scrollHeight` 只有 850px，按「`overflow-y` 是 auto/scroll 且可滚距离大于 600」扫全页也挑不出任何滚动容器。
 
 ### 为什么会这样
 
@@ -233,7 +233,7 @@ client bundle 是页面加载时从包目录取的，**宿主侧代码是进程�
 
 ### 出了什么问题
 
-源码落盘上线后，小红书的 `index.a9f61821.js`（1.6MB）和大包一律失败，落盘记录里写着「抓取时没读到这个脚本：CDP 命令超时：Debugger.getScriptSource」；同一条调用链里的小脚本（几十 KB）却能存下来。
+源码落盘上线后，某内容站的 `index.a9f61821.js`（1.6MB）和大包一律失败，落盘记录里写着「抓取时没读到这个脚本：CDP 命令超时：Debugger.getScriptSource」；同一条调用链里的小脚本（几十 KB）却能存下来。
 
 更糟的是优先级倒挂——落盘成功的恰好是不需要的那些：
 

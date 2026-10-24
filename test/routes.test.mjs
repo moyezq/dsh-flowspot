@@ -753,7 +753,7 @@ test('bridge: attach, events, result, poll and detach go through the channel', a
   assert.equal(poll.json.ok, true)
   assert.equal(poll.json.command, null)
 
-  // 整份脚本源码的回包就是这个量级（单脚本上限 4MB，实测小红书 1.6~3.2MB）：
+  // 整份脚本源码的回包就是这个量级（单脚本上限 4MB，实测某内容站 1.6~3.2MB）：
   // 桥接回包必须放得下，不能再被面板那套 1MB 上限掐掉——掐掉时宿主只会看到「CDP 命令超时」。
   const bigScript = 'x'.repeat(5 * 1024 * 1024)
   const bigResult = await call(routes, '/dsh-flowspot/bridge/result', {
